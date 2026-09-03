@@ -4,8 +4,8 @@
 代車・乗り替わりがあった日は OVERRIDES に登録すると、その日の明細だけを
 別の車番（担当者）へ付け替える。
 """
-import re, collections, pdfplumber, openpyxl
-from openpyxl.styles import Font
+import re, collections, datetime, pdfplumber, openpyxl
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 PDF  = '/root/.claude/uploads/e46d2994-6f12-5b86-9532-97b1f22855c3/6be19bcb-____.pdf'
 XLSX = '/root/.claude/uploads/e46d2994-6f12-5b86-9532-97b1f22855c3/e7bb02bd-____.xlsx'
@@ -71,6 +71,78 @@ def parse(path):
     return recs
 
 
+def to_date(s):
+    """'26/08/01' -> date(2026, 8, 1)"""
+    y, m, d = (int(x) for x in s.split('/'))
+    return datetime.date(2000 + y, m, d)
+
+
+def build_detail_sheet(wb, recs, names, order):
+    """車番別の利用明細シートを作る。"""
+    if '車番別明細' in wb.sheetnames:
+        del wb['車番別明細']
+    ws = wb.create_sheet('車番別明細')
+    YEN = '"￥"#,##0'
+    head = ['車番', '担当', '利用日', '時分', '到着日', '時分',
+            '入口ＩＣ', '出口ＩＣ', '通行料金', '割引', '備考']
+    thin = Side(style='thin', color='BFBFBF')
+    for i, h in enumerate(head, 1):
+        c = ws.cell(1, i, h)
+        c.font = Font(name='游ゴシック', sz=11, b=True)
+        c.fill = PatternFill('solid', fgColor='DDEBF7')
+        c.alignment = Alignment(horizontal='center')
+        c.border = Border(bottom=thin)
+
+    by_car = collections.defaultdict(list)
+    for r in recs:
+        by_car[r['charge_to']].append(r)
+
+    row = 2
+    for car in order:
+        rs = sorted(by_car.get(car, []), key=lambda r: (r['d1'], r['t1']))
+        if not rs:
+            continue
+        for r in rs:
+            same_day = r['d2'] == r['d1']
+            ic = r['ic'].split()
+            note = []
+            if len(ic) == 1:
+                ic = [ic[0], '']
+                note.append('単独課金')
+            if r['car'] != car:
+                note.append('実車番%s に乗車' % r['car'])
+            vals = [car, names.get(car, ''), to_date(r['d1']), r['t1'],
+                    None if same_day else to_date(r['d2']), r['t2'],
+                    ic[0], ic[1], r['fee'], r['note'], '／'.join(note) or None]
+            for i, v in enumerate(vals, 1):
+                c = ws.cell(row, i, v)
+                c.font = Font(name='游ゴシック', sz=10)
+            ws.cell(row, 3).number_format = 'yyyy/m/d'
+            ws.cell(row, 5).number_format = 'yyyy/m/d'
+            ws.cell(row, 9).number_format = YEN
+            row += 1
+        c = ws.cell(row, 8, '小計')
+        c.alignment = Alignment(horizontal='right')
+        ws.cell(row, 9, sum(r['fee'] for r in rs)).number_format = YEN
+        ws.cell(row, 10, '%d件' % len(rs))
+        for i in range(1, 12):
+            cell = ws.cell(row, i)
+            cell.font = Font(name='游ゴシック', sz=10, b=True)
+            cell.border = Border(top=thin, bottom=thin)
+        row += 2
+
+    ws.cell(row, 8, '総合計').font = Font(name='游ゴシック', sz=11, b=True)
+    ws.cell(row, 8).alignment = Alignment(horizontal='right')
+    ws.cell(row, 9, sum(r['fee'] for r in recs)).number_format = YEN
+    ws.cell(row, 9).font = Font(name='游ゴシック', sz=11, b=True)
+    ws.cell(row, 10, '%d件' % len(recs)).font = Font(name='游ゴシック', sz=11, b=True)
+
+    for col, w in zip('ABCDEFGHIJK', (7, 12, 11, 7, 11, 7, 16, 16, 11, 13, 20)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = 'A2'
+    return ws
+
+
 def main():
     recs = parse(PDF)
     grand = sum(r['fee'] for r in recs)
@@ -80,6 +152,7 @@ def main():
     moved = collections.Counter()
     for r in recs:
         to = OVERRIDES.get((r['car'], r['d1']), r['car'])
+        r['charge_to'] = to
         if to != r['car']:
             moved[(r['car'], to)] += r['fee']
         totals[to] += r['fee']
@@ -104,6 +177,8 @@ def main():
 
     extra = sorted(set(totals) - listed)
     row = ws.max_row + 1
+    order = [ws.cell(r, 1).value for r in range(2, row)
+             if isinstance(ws.cell(r, 1).value, int)] + extra
     for car in extra:
         ws.cell(row, 1).value = car
         ws.cell(row, 2).value = '（一覧に無い車番）'
@@ -145,6 +220,13 @@ def main():
     ws.column_dimensions['C'].width = 13
     ws.column_dimensions['D'].width = 9
     ws.column_dimensions['E'].width = 34
+
+    names = {}
+    for r in range(2, tr):
+        car, nm = ws.cell(r, 1).value, ws.cell(r, 2).value
+        if isinstance(car, int) and nm:
+            names[car] = nm
+    build_detail_sheet(wb, recs, names, order)
     wb.save(OUT)
 
     print('明細に出現しない車番:', sorted(c for c in listed if c not in totals))
