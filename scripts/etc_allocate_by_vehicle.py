@@ -124,7 +124,6 @@ def build_detail_sheet(wb, recs, names, order):
         c = ws.cell(row, 8, '小計')
         c.alignment = Alignment(horizontal='right')
         ws.cell(row, 9, sum(r['fee'] for r in rs)).number_format = YEN
-        ws.cell(row, 10, '%d件' % len(rs))
         for i in range(1, 12):
             cell = ws.cell(row, i)
             cell.font = Font(name='游ゴシック', sz=10, b=True)
@@ -135,7 +134,6 @@ def build_detail_sheet(wb, recs, names, order):
     ws.cell(row, 8).alignment = Alignment(horizontal='right')
     ws.cell(row, 9, sum(r['fee'] for r in recs)).number_format = YEN
     ws.cell(row, 9).font = Font(name='游ゴシック', sz=11, b=True)
-    ws.cell(row, 10, '%d件' % len(recs)).font = Font(name='游ゴシック', sz=11, b=True)
 
     for col, w in zip('ABCDEFGHIJK', (7, 12, 11, 7, 11, 7, 16, 16, 11, 13, 20)):
         ws.column_dimensions[col].width = w
@@ -171,7 +169,6 @@ def main():
             listed.add(car)
             ws.cell(row, 3).value = totals.get(car, 0)
             ws.cell(row, 3).number_format = YEN
-            ws.cell(row, 4).value = counts.get(car, 0)
         else:
             ws.cell(row, 3).value = None
 
@@ -184,13 +181,10 @@ def main():
         ws.cell(row, 2).value = '（一覧に無い車番）'
         ws.cell(row, 3).value = totals[car]
         ws.cell(row, 3).number_format = YEN
-        ws.cell(row, 4).value = counts[car]
         row += 1
 
-    ws['D1'] = '件数'
+    ws['D1'] = '備考'
     ws['D1'].font = Font(name='游ゴシック', sz=11, b=True)
-    ws['E1'] = '備考'
-    ws['E1'].font = Font(name='游ゴシック', sz=11, b=True)
 
     # 付け替えのあった行に備考を入れる
     notes = collections.defaultdict(list)
@@ -202,24 +196,22 @@ def main():
     for r in range(2, row):
         car = ws.cell(r, 1).value
         if isinstance(car, int) and car in notes:
-            ws.cell(r, 5).value = '／'.join(notes[car])
-            ws.cell(r, 5).font = Font(name='游ゴシック', sz=10)
+            ws.cell(r, 4).value = '／'.join(notes[car])
+            ws.cell(r, 4).font = Font(name='游ゴシック', sz=10)
 
     tr = row + 1
     ws.cell(tr, 2).value = '合計'
     ws.cell(tr, 3).value = sum(totals.values())
     ws.cell(tr, 3).number_format = YEN
-    ws.cell(tr, 4).value = sum(counts.values())
-    for col in (2, 3, 4):
+    for col in (2, 3):
         ws.cell(tr, col).font = Font(name='游ゴシック', sz=12, b=True)
     for r in range(2, tr + 1):
-        for col in (1, 2, 3, 4):
+        for col in (1, 2, 3):
             cell = ws.cell(r, col)
             if cell.font.name is None:
                 cell.font = Font(name='游ゴシック', sz=12)
     ws.column_dimensions['C'].width = 13
-    ws.column_dimensions['D'].width = 9
-    ws.column_dimensions['E'].width = 34
+    ws.column_dimensions['D'].width = 34
 
     names = {}
     for r in range(2, tr):
