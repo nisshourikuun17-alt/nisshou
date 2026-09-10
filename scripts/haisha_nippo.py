@@ -16,7 +16,7 @@
     python scripts/haisha_nippo.py              入力にある日付ぶんの日報を作る
     python scripts/haisha_nippo.py --date 2026-09-10 --tanto 藁科
 """
-import argparse, collections, datetime, os
+import argparse, collections, datetime, os, re
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -139,6 +139,43 @@ def load(path, default_date=None):
             from_=r[4] or '', to_=r[5] or '', driver=driver or '',
             trip=r[7], note=r[8] or '', row=i))
     return recs, order, vehicles, customers
+
+
+def read_text(path, vehicles, default_date=None):
+    """読み取りテキストから明細を作る。写真をAIに読ませた結果を貼る想定。
+
+        2026/9/10                       ← 日付行。以降この日付が続く
+        5022  玉ねぎ  鈴与  日立  豊洲     ← 車番 積荷 得意先 発地 着地
+        40ft  9:30  OOCL  大井  水戸市  吉成  6455   ← 6列目=乗務員 7列目=備考
+
+    区切りはタブでも2文字以上の空白でもよい。空行と # 以降は無視する。
+    """
+    recs, day = [], default_date
+    for i, raw in enumerate(open(path, encoding='utf-8'), 1):
+        # 末尾の空欄（着地なしなど）を消さないよう、改行だけ落として分割する
+        line = raw.split('#')[0].rstrip('\r\n')
+        if not line.strip():
+            continue
+        cols = [c.strip() for c in (line.split('\t') if '\t' in line
+                                    else re.split(r'\s{2,}', line.strip()))]
+        if len(cols) == 1:
+            d = to_date(cols[0])
+            if d is None:
+                raise SystemExit('%s %d行目: 日付として読めません（%r）' % (path, i, line))
+            day = d
+            continue
+        if day is None:
+            raise SystemExit('%s %d行目: 先に日付の行を書いてください。' % (path, i))
+        if len(cols) < 5:
+            raise SystemExit('%s %d行目: 車番 積荷 得意先 発地 着地 の5つが要ります（%r）'
+                             % (path, i, line))
+        cols = cols[:7] + [''] * max(0, 7 - len(cols))
+        car = int(cols[0]) if cols[0].isdigit() else cols[0]
+        recs.append(dict(
+            date=day, car=car, item=cols[1], cust=cols[2], from_=cols[3],
+            to_=cols[4], driver=cols[5] or vehicles.get(cols[0], ''),
+            trip=None, note=cols[6], row=i))
+    return recs
 
 
 def group(recs, order):
@@ -292,8 +329,9 @@ def build_summary(wb, recs, order, cars):
 
 def dropdown(ws, src_sheet, src_range, target):
     """マスタを参照するプルダウンを付ける。打ち間違いと打鍵数を減らす。"""
+    # formula1 に '=' を付けると Excel が破損ファイルと判定するので付けない
     dv = DataValidation(type='list', allow_blank=True,
-                        formula1="='%s'!%s" % (src_sheet, src_range))
+                        formula1="'%s'!%s" % (src_sheet, src_range))
     ws.add_data_validation(dv)
     dv.add(target)
 
@@ -361,6 +399,20 @@ def make_template(path):
     print('入力テンプレートを作りました: %s' % path)
 
 
+def append_input(path, recs):
+    """読み取った明細を『配車入力』シートの末尾に追記する。"""
+    wb = openpyxl.load_workbook(path)
+    ws = wb['配車入力']
+    last = None
+    for r in recs:
+        ws.append([r['date'] if r['date'] != last else None, r['car'], r['item'],
+                   r['cust'], r['from_'], r['to_'], r['driver'], None, r['note']])
+        ws.cell(ws.max_row, 1).number_format = 'yyyy/m/d'
+        last = r['date']
+    wb.save(path)
+    print('配車入力に %d 便を追記しました: %s' % (len(recs), path))
+
+
 def main():
     ap = argparse.ArgumentParser(description='配車入力から配車日報を作る')
     ap.add_argument('--input', default=IN, help='入力ブック（既定: 配車入力.xlsx）')
@@ -368,6 +420,9 @@ def main():
     ap.add_argument('--outdir', default=ROOT, help='出力先ディレクトリ')
     ap.add_argument('--tanto', default='', help='担当者名（日報の右上に入る）')
     ap.add_argument('--spacer', action='store_true', help='乗務員ごとに空行を入れる')
+    ap.add_argument('--text', help='読み取りテキストから日報を作る（配車入力は使わない）')
+    ap.add_argument('--save-input', action='store_true',
+                    help='--text の内容を配車入力シートにも追記する')
     ap.add_argument('--template', action='store_true', help='入力テンプレートを作る')
     args = ap.parse_args()
 
@@ -375,8 +430,13 @@ def main():
         make_template(args.input)
         return
 
-    recs, order, cars, customers = load(
-        args.input, to_date(args.date) if args.date else None)
+    want = to_date(args.date) if args.date else None
+    recs, order, cars, customers = load(args.input, want)
+    if args.text:
+        # テキストを渡された日は、そちらを明細として使う（マスタはブックから）
+        recs = read_text(args.text, cars, want)
+        if args.save_input:
+            append_input(args.input, recs)
     if not recs:
         raise SystemExit('『配車入力』シートにデータがありません: %s' % args.input)
     days = sorted({r['date'] for r in recs})
