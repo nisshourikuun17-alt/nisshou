@@ -68,6 +68,11 @@ VEHICLES = [
     (1983, '木村'), (5164, '高橋'), (1523, '山崎'), (5159, '根本'),
     (3134, '安野'), (1000, '関根'), (3069, '神長'), (6891, '小堀内'),
 ]
+# LINE連絡文の定型句。会社の言い回しに合わせてここを直せば全員分に反映される。
+LINE_GREETING = 'お疲れさまです。'
+LINE_INTRO    = '%sの配車をご連絡いたします。'
+LINE_CLOSING  = 'お気をつけて、よろしくお願いいたします。'
+
 CUSTOMERS = ['鈴与', 'エアウォーター', '豊総合物流', 'ロードリーム',
              '大晴通商', '光洋運輸', '行方運送', '東亜物産', 'OOCL']
 
@@ -548,33 +553,39 @@ def build_line(day, recs, order):
     """乗務員ごとのLINE連絡文を作る。1人分ずつコピーして貼れるように区切る。
 
     車番が全便で同じならヘッダにまとめ、便ごとに違う日は各便に付ける。
+    インデントは全角空白にしてLINE上で桁が揃うようにする。
     """
-    d = '%d/%d(%s)' % (day.month, day.day, WEEK[day.weekday()])
+    d = '%d月%d日（%s）' % (day.month, day.day, WEEK[day.weekday()])
     out = []
     for name, trips in group(recs, order):
         if name is None:
             continue
         cars = sorted({str(t['car']) for t in trips if not blank(t['car'])})
         one = cars[0] if len(cars) == 1 else None
-        lines = ['【%s】%sさん' % (d, name)]
+        lines = ['%sさん' % name, '', LINE_GREETING, LINE_INTRO % d, '']
         if one:
-            lines.append('車番 %s' % one)
-        lines.append('')
+            lines += ['車番　%s' % one, '']
         for i, t in enumerate(trips, 1):
-            car = '' if one else ('［%s］' % t['car'] if not blank(t['car']) else '')
+            lines.append('【%d便】' % i)
+            if not one and not blank(t['car']):
+                lines.append('　車番　%s' % t['car'])
             cust = '（%s）' % t['cust'] if t['cust'] else ''
-            lines.append('%d便 %s%s%s' % (i, car, t['item'], cust))
-            lines.append('　%s → %s' % (t['from_'] or '？', t['to_'] or '？'))
+            lines.append('　積荷　%s%s' % (t['item'] or '未定', cust))
+            lines.append('　発地　%s' % (t['from_'] or '未定'))
+            lines.append('　着地　%s' % (t['to_'] or '未定'))
             if not blank(t['note']):
-                lines.append('　※%s' % t['note'])
+                lines.append('　備考　%s' % t['note'])
+            lines.append('')
+        lines.append(LINE_CLOSING)
         out.append('\n'.join(lines))
 
     un = [r for r in recs if blank(r['driver'])]
     if un:
-        lines = ['【%s】未配車 %d便（連絡先未定）' % (d, len(un)), '']
+        lines = ['※未配車 %d便（%s）' % (len(un), d), '']
         for r in un:
-            lines.append('・%s（%s）%s → %s'
-                         % (r['item'], r['cust'], r['from_'] or '？', r['to_'] or '？'))
+            lines.append('・%s（%s）　%s → %s'
+                         % (r['item'] or '未定', r['cust'],
+                            r['from_'] or '未定', r['to_'] or '未定'))
         out.append('\n'.join(lines))
 
     sep = '\n\n' + '─' * 24 + '\n\n'
