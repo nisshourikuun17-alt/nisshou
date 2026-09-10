@@ -21,8 +21,12 @@ YEAR = 2026
 MONTH = 10
 
 # 頭（運転の主担当）と助手。人数が違っても動く。
-HEADS = ['頭A', '頭B', '頭C', '頭D']
-ASSISTANTS = ['助手A', '助手B', '助手C', '助手D']
+# 頭は号車が固定（HEADS の並び順に ①②③④…）、助手はその日に組む頭の号車を書く。
+HEADS = ['船木智一', '和田陽向太', '永井海里', '横山凌']
+ASSISTANTS = ['山谷大地', '新田', '古川', '山口']
+
+# 出勤表に列だけ用意して、ローテーションには入れない人（空欄で出力）
+EXTRA_COLUMNS = ['徳留', '派遣']
 
 CREWS_WEEKDAY = 2       # 平日に出す組数
 CREWS_WEEKEND = 4       # 土日に出す組数（土日を多めに）
@@ -38,9 +42,10 @@ PREFER_LONG_RUNS = True  # True: 出勤をまとめて連勤気味に / False: �
 SEED = 20261001          # 乱数種。変えると別パターンのシフトが出る
 TRIES = 400              # 生成の試行回数
 
-OUT = f'{YEAR}年{MONTH}月_シフト表.xlsx'
+OUT = f'{YEAR}年{MONTH}月_出勤表.xlsx'
 
 WEEK_JA = ['月', '火', '水', '木', '金', '土', '日']
+CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩'
 
 # ------------------------------------------------------------ 日別の枠 ----
 
@@ -217,32 +222,21 @@ def make_pairs(days, head_work, assist_work, rng):
 # ---------------------------------------------------------------- 出力 ----
 
 
-def mark(worked, requested):
-    if worked:
-        return '○'
-    return '希' if requested else '－'
-
-
-def print_table(days, head_work, assist_work, heads_off, assist_off, pairs_by_day, shortages, seen):
-    hdr = '氏名      ' + ' '.join(f'{s["day"]:>2}' for s in days) + '  出勤 土日'
-    print(hdr)
-    print('-' * len(hdr))
-    print('曜日      ' + ' '.join(f'{WEEK_JA[s["wd"]]:>2}' for s in days))
-    for members, work, offs in ((HEADS, head_work, heads_off), (ASSISTANTS, assist_work, assist_off)):
-        for m in members:
-            cells = ' '.join(f'{mark(work[m][i], days[i]["day"] in offs[m]):>2}' for i in range(len(days)))
-            we = sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i])
-            print(f'{m:<10}{cells}  {sum(work[m]):>3} {we:>3}')
-        print()
-    print('連勤の最大:', ', '.join(
-        f'{m}={max_run(work[m], CARRY_IN_STREAK.get(m, 0))}'
-        for members, work in ((HEADS, head_work), (ASSISTANTS, assist_work))
-        for m in members))
-    if shortages:
-        print('\n人数が足りず組数を減らした日:')
-        for d, want, got in shortages:
-            print(f'  {MONTH}/{d}  {want}組 → {got}組')
-    print('\n組み合わせ回数:', ', '.join(f'{h}×{a}={c}' for (h, a), c in sorted(seen.items())))
+def build_assignment(days, head_work, assist_work, pairs_by_day):
+    """各人・各日のセル内容を決める。頭は固定の号車、助手はその日に組む頭の号車。"""
+    car_no = {h: i + 1 for i, h in enumerate(HEADS)}
+    cells = {m: [''] * len(days) for m in HEADS + ASSISTANTS}
+    for i in range(len(days)):
+        partner = {a: car_no[h] for h, a in pairs_by_day[i]}
+        for m in HEADS:
+            cells[m][i] = CIRCLED[car_no[m] - 1] if head_work[m][i] else '休'
+        for m in ASSISTANTS:
+            if not assist_work[m][i]:
+                cells[m][i] = '休'
+            else:
+                n = partner.get(m)
+                cells[m][i] = CIRCLED[n - 1] if n else '○'
+    return cells
 
 
 def max_run(flags, carry):
@@ -253,104 +247,138 @@ def max_run(flags, carry):
     return best
 
 
-def write_xlsx(days, head_work, assist_work, heads_off, assist_off, pairs_by_day, notes, shortages):
+def print_table(days, head_work, assist_work, cells, pairs_by_day, shortages, seen):
+    members = HEADS + ASSISTANTS
+    width = max(len(m) for m in members) + 2
+    hdr = '氏名'.ljust(width) + ' '.join(f'{s["day"]:>2}' for s in days) + '  出勤 土日'
+    print(hdr)
+    print('-' * len(hdr))
+    print('曜日'.ljust(width) + ' '.join(f'{WEEK_JA[s["wd"]]:>2}' for s in days))
+    print('車台数'.ljust(width - 1) + ' '.join(f'{len(pairs_by_day[i]):>2}' for i in range(len(days))))
+    for label, group, work in (('【頭】', HEADS, head_work), ('【助手】', ASSISTANTS, assist_work)):
+        print(label)
+        for m in group:
+            line = ' '.join(f'{cells[m][i]:>2}' for i in range(len(days)))
+            we = sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i])
+            print(m.ljust(width) + line + f'  {sum(work[m]):>3} {we:>3}')
+    print()
+    print('連勤の最大: ' + ', '.join(
+        f'{m}={max_run(work[m], CARRY_IN_STREAK.get(m, 0))}'
+        for group, work in ((HEADS, head_work), (ASSISTANTS, assist_work))
+        for m in group))
+    if shortages:
+        print('\n人数が足りず組数を減らした日:')
+        for d, want, got in sorted(set(shortages)):
+            print(f'  {MONTH}/{d}  {want}組 → {got}組')
+    print('\n組み合わせ回数: ' + ', '.join(f'{h}×{a}={c}' for (h, a), c in sorted(seen.items())))
+
+
+def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs_by_day, notes, shortages):
+    """手書きの出勤表と同じ様式（縦＝日付、横＝氏名、セル＝号車 or 休）で書き出す。"""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     wb = Workbook()
     ws = wb.active
-    ws.title = 'シフト表'
+    ws.title = '出勤表'
 
-    thin = Side(style='thin', color='999999')
+    thin = Side(style='thin', color='000000')
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     center = Alignment(horizontal='center', vertical='center')
     sat_fill = PatternFill('solid', fgColor='DDEBF7')
     sun_fill = PatternFill('solid', fgColor='FCE4E4')
     off_fill = PatternFill('solid', fgColor='F2F2F2')
     req_fill = PatternFill('solid', fgColor='FFF2CC')
-    head_fill = PatternFill('solid', fgColor='EDEDED')
+    name_fill = PatternFill('solid', fgColor='EFEFEF')
+    big = Font(bold=True, size=14)
 
-    ws.cell(1, 1, f'{YEAR}年{MONTH}月 シフト表（ツーマン）').font = Font(bold=True, size=14)
-    ws.cell(2, 1, f'平日{CREWS_WEEKDAY}組／土日{CREWS_WEEKEND}組・連続出勤{MAX_CONSECUTIVE}日まで・○＝出勤／希＝希望休')
+    members = HEADS + ASSISTANTS
+    columns = members + EXTRA_COLUMNS
+    ncols = 3 + len(columns)          # 日 / 曜 / 車台数 / 氏名…
 
-    top = 4
-    ws.cell(top, 1, '氏名').font = Font(bold=True)
-    ws.cell(top + 1, 1, '曜日').font = Font(bold=True)
-    for i, spec in enumerate(days):
-        col = 2 + i
-        c1 = ws.cell(top, col, spec['day'])
-        c2 = ws.cell(top + 1, col, WEEK_JA[spec['wd']])
-        for c in (c1, c2):
-            c.alignment = center
-            c.border = border
-            c.font = Font(bold=True)
-            if spec['wd'] == 5:
-                c.fill = sat_fill
-            elif spec['wd'] == 6:
-                c.fill = sun_fill
-    ncol = 2 + len(days)
-    for j, title in enumerate(('出勤', '土日', '公休')):
-        c = ws.cell(top, ncol + j, title)
+    # 見出し行
+    ws.cell(1, 3, f'{YEAR}年').font = big
+    ws.cell(1, 3).alignment = center
+    ws.cell(1, 3 + max(1, len(columns) // 3), '出勤表').font = big
+    ws.cell(1, 3 + max(2, len(columns) * 2 // 3), f'{MONTH}月度').font = big
+
+    HEAD_ROW = 2
+    for j, title in enumerate(('', '', '車台数')):
+        c = ws.cell(HEAD_ROW, 1 + j, title)
         c.font = Font(bold=True)
         c.alignment = center
         c.border = border
-        ws.cell(top + 1, ncol + j, '').border = border
-
-    row = top + 2
-    for label, members, work, offs in (('頭', HEADS, head_work, heads_off),
-                                       ('助手', ASSISTANTS, assist_work, assist_off)):
-        c = ws.cell(row, 1, label)
+    for j, name in enumerate(columns):
+        c = ws.cell(HEAD_ROW, 4 + j, name)
         c.font = Font(bold=True)
-        c.fill = head_fill
+        c.alignment = center
         c.border = border
-        for col in range(2, ncol + 3):
-            ws.cell(row, col).fill = head_fill
-            ws.cell(row, col).border = border
-        row += 1
-        for m in members:
-            ws.cell(row, 1, m).border = border
-            for i, spec in enumerate(days):
-                requested = spec['day'] in offs[m]
-                cell = ws.cell(row, 2 + i, mark(work[m][i], requested))
-                cell.alignment = center
-                cell.border = border
+        c.fill = name_fill
+
+    for i, spec in enumerate(days):
+        r = HEAD_ROW + 1 + i
+        c = ws.cell(r, 1, spec['day'])
+        c.alignment = center
+        c.border = border
+        c = ws.cell(r, 2, WEEK_JA[spec['wd']])
+        c.alignment = center
+        c.border = border
+        if spec['wd'] == 5:
+            c.font = Font(color='0070C0', bold=True)
+            c.fill = sat_fill
+        elif spec['wd'] == 6:
+            c.font = Font(color='C00000', bold=True)
+            c.fill = sun_fill
+        c = ws.cell(r, 3, len(pairs_by_day[i]))
+        c.alignment = center
+        c.border = border
+        for j, name in enumerate(columns):
+            cell = ws.cell(r, 4 + j)
+            cell.alignment = center
+            cell.border = border
+            if name not in cells:
+                continue
+            offs = heads_off if name in HEADS else assist_off
+            requested = spec['day'] in offs[name]
+            cell.value = cells[name][i]
+            if cell.value == '休':
+                cell.fill = req_fill if requested else off_fill
                 if requested:
-                    cell.fill = req_fill
-                elif not work[m][i]:
-                    cell.fill = off_fill
-                elif spec['wd'] == 5:
-                    cell.fill = sat_fill
-                elif spec['wd'] == 6:
-                    cell.fill = sun_fill
-            total = sum(work[m])
-            we = sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i])
-            for j, v in enumerate((total, we, len(days) - total)):
-                c = ws.cell(row, ncol + j, v)
-                c.alignment = center
-                c.border = border
-            row += 1
+                    cell.font = Font(bold=True)
+            elif spec['wd'] == 5:
+                cell.fill = sat_fill
+            elif spec['wd'] == 6:
+                cell.fill = sun_fill
 
-    row += 1
-    ws.cell(row, 1, '出勤組数').font = Font(bold=True)
-    for i, spec in enumerate(days):
-        c = ws.cell(row, 2 + i, len(pairs_by_day[i]))
-        c.alignment = center
-        c.border = border
+    # 合計・残業行
+    total_row = HEAD_ROW + 1 + len(days)
+    ws.cell(total_row, 1, '合計').font = Font(bold=True)
+    ws.cell(total_row + 1, 1, '残業').font = Font(bold=True)
+    for r in (total_row, total_row + 1):
+        for col in range(1, ncols + 1):
+            ws.cell(r, col).border = border
+            ws.cell(r, col).alignment = center
+    ws.cell(total_row, 3, sum(len(p) for p in pairs_by_day))
+    for j, name in enumerate(columns):
+        if name in cells:
+            work = head_work if name in HEADS else assist_work
+            ws.cell(total_row, 4 + j, sum(work[name]))
 
-    ws.freeze_panes = 'B6'
-    ws.column_dimensions['A'].width = 12
-    for i in range(len(days)):
-        ws.column_dimensions[ws.cell(1, 2 + i).column_letter].width = 4.2
-    for j in range(3):
-        ws.column_dimensions[ws.cell(1, ncol + j).column_letter].width = 6
+    ws.freeze_panes = 'D3'
+    ws.column_dimensions['A'].width = 4.5
+    ws.column_dimensions['B'].width = 4.5
+    ws.column_dimensions['C'].width = 7
+    for j in range(len(columns)):
+        ws.column_dimensions[ws.cell(1, 4 + j).column_letter].width = 11
 
     # --- 組み合わせシート ---
     ws2 = wb.create_sheet('組み合わせ')
     ws2.cell(1, 1, '日').font = Font(bold=True)
     ws2.cell(1, 2, '曜').font = Font(bold=True)
+    ws2.cell(1, 3, '車台数').font = Font(bold=True)
     maxc = max((len(p) for p in pairs_by_day), default=0)
     for k in range(maxc):
-        ws2.cell(1, 3 + k, f'{k + 1}号車').font = Font(bold=True)
+        ws2.cell(1, 4 + k, f'{CIRCLED[k]}号車').font = Font(bold=True)
     for i, spec in enumerate(days):
         r = 2 + i
         ws2.cell(r, 1, f'{MONTH}/{spec["day"]}').border = border
@@ -361,15 +389,20 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, pairs_by_day
             c.fill = sat_fill
         elif spec['wd'] == 6:
             c.fill = sun_fill
+        c = ws2.cell(r, 3, len(pairs_by_day[i]))
+        c.border = border
+        c.alignment = center
+        by_car = {HEADS.index(h): (h, a) for h, a in pairs_by_day[i]}
         for k in range(maxc):
-            v = f'{pairs_by_day[i][k][0]} ／ {pairs_by_day[i][k][1]}' if k < len(pairs_by_day[i]) else ''
-            cell = ws2.cell(r, 3 + k, v)
+            pair = by_car.get(k)
+            cell = ws2.cell(r, 4 + k, f'{pair[0]} ／ {pair[1]}' if pair else '')
             cell.border = border
             cell.alignment = center
     ws2.column_dimensions['A'].width = 8
     ws2.column_dimensions['B'].width = 5
+    ws2.column_dimensions['C'].width = 7
     for k in range(maxc):
-        ws2.column_dimensions[ws2.cell(1, 3 + k).column_letter].width = 20
+        ws2.column_dimensions[ws2.cell(1, 4 + k).column_letter].width = 24
 
     # --- 備考シート ---
     ws3 = wb.create_sheet('備考')
@@ -379,17 +412,31 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, pairs_by_day
     for k, v in (('対象月', f'{YEAR}年{MONTH}月'),
                  ('平日の組数', CREWS_WEEKDAY),
                  ('土日の組数', CREWS_WEEKEND),
-                 ('連続出勤の上限', f'{MAX_CONSECUTIVE}日')):
+                 ('連続出勤の上限', f'{MAX_CONSECUTIVE}日'),
+                 ('頭（号車固定）', '、'.join(f'{CIRCLED[i]}{h}' for i, h in enumerate(HEADS))),
+                 ('助手', '、'.join(ASSISTANTS))):
         ws3.cell(r, 1, k)
         ws3.cell(r, 2, v)
         r += 1
     r += 1
     ws3.cell(r, 1, '希望休').font = Font(bold=True)
     r += 1
-    for m, ds in REQUESTED_OFF.items():
-        ws3.cell(r, 1, m)
-        ws3.cell(r, 2, '、'.join(f'{MONTH}/{d}' for d in ds))
-        r += 1
+    for m in members:
+        ds = REQUESTED_OFF.get(m)
+        if ds:
+            ws3.cell(r, 1, m)
+            ws3.cell(r, 2, '、'.join(f'{MONTH}/{d}' for d in ds))
+            r += 1
+    r += 1
+    ws3.cell(r, 1, '出勤日数・土日出勤').font = Font(bold=True)
+    r += 1
+    for group, work in ((HEADS, head_work), (ASSISTANTS, assist_work)):
+        for m in group:
+            we = sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i])
+            ws3.cell(r, 1, m)
+            ws3.cell(r, 2, f'出勤{sum(work[m])}日／土日{we}日／公休{len(days) - sum(work[m])}日／'
+                           f'最大{max_run(work[m], CARRY_IN_STREAK.get(m, 0))}連勤')
+            r += 1
     if notes or shortages:
         r += 1
         ws3.cell(r, 1, '注意').font = Font(bold=True)
@@ -397,11 +444,11 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, pairs_by_day
         for note in notes:
             ws3.cell(r, 1, note)
             r += 1
-        for d, want, got in shortages:
-            ws3.cell(r, 1, f'{MONTH}/{d} 連勤上限のため {want}組 → {got}組')
+        for d, want, got in sorted(set(shortages)):
+            ws3.cell(r, 1, f'{MONTH}/{d} 人数不足のため {want}組 → {got}組')
             r += 1
     ws3.column_dimensions['A'].width = 46
-    ws3.column_dimensions['B'].width = 30
+    ws3.column_dimensions['B'].width = 60
 
     wb.save(OUT)
     return OUT
@@ -449,7 +496,8 @@ def main():
             shortages.append((spec['day'], spec['target'], min(h, a)))
 
     pairs_by_day, seen = make_pairs(days, head_work, assist_work, rng)
-    print_table(days, head_work, assist_work, heads_off, assist_off, pairs_by_day, shortages, seen)
+    cells = build_assignment(days, head_work, assist_work, pairs_by_day)
+    print_table(days, head_work, assist_work, cells, pairs_by_day, shortages, seen)
     for note in notes:
         print('注意:', note)
 
@@ -461,7 +509,8 @@ def main():
     else:
         print('\n制約チェック: 希望休・連勤上限・組編成すべてOK')
 
-    path = write_xlsx(days, head_work, assist_work, heads_off, assist_off, pairs_by_day, notes, shortages)
+    path = write_xlsx(days, head_work, assist_work, heads_off, assist_off,
+                      cells, pairs_by_day, notes, shortages)
     print('出力:', path)
 
 
