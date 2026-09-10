@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 """配車入力から配車日報（実績帳票）を作る。
 
-入力  配車入力.xlsx     シート『配車入力』『車両マスタ』『荷主マスタ』
-出力  配車日報_YYYYMMDD.xlsx  シート『配車日報』『車番別集計』『荷主別集計』
+入力  配車入力.xlsx     シート『配車入力』『乗務員マスタ』『得意先マスタ』
+出力  配車日報_YYYYMMDD.xlsx  シート『配車日報』『乗務員別集計』『得意先別集計』
 
-車番をキーにドライバー名を引くため、ETC高速料金の集計
-（etc_allocate_by_vehicle.py）と同じ車番で月次の突き合わせができる。
+日報は実際の用紙と同じ左右2ブロック構成にする。
+  左ブロック  … 1便目
+  右ブロック  … 2便目以降（2便目が1行目、3便目が2行目）
+乗務員の並び順は『乗務員マスタ』の表示順に従う。
+
+車番は便ごとに持つ（同じ乗務員でも便で車を替えるため）。ETC高速料金の
+車番別集計（etc_allocate_by_vehicle.py）とは車番で突き合わせできる。
 
     python scripts/haisha_nippo.py --template   入力テンプレートを作る
     python scripts/haisha_nippo.py              入力にある日付ぶんの日報を作る
-    python scripts/haisha_nippo.py --date 2026-09-10
+    python scripts/haisha_nippo.py --date 2026-09-10 --tanto 藁科
 """
 import argparse, collections, datetime, os
 import openpyxl
@@ -21,28 +26,38 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IN   = os.path.join(ROOT, '配車入力.xlsx')
 
 FONT = '游ゴシック'
-YEN  = '"￥"#,##0'
 WEEK = '月火水木金土日'
-GRAY = Side(style='thin', color='BFBFBF')
+BOX  = Border(*[Side(style='thin', color='000000')] * 4)
 
 # 『配車入力』シートの列順。テンプレート作成と読み込みで共用する。
-COLS = ['日付', '荷主', '受付No', '車番', '積地', '積時刻', '降地', '降時刻',
-        '品目', '数量', '単位', '運賃', '高速料金', '備考']
+COLS = ['日付', '乗務員', '便', '車番', '積荷', '得意先', '発地', '着地', '備考']
 
-# 日報の列順と幅。数量・単位は運賃と分けて持ち、月次で合算できるようにする。
-HEAD = ['No', '車番', 'ドライバー', '荷主', '受付No', '積地', '積時刻',
-        '降地', '降時刻', '品目', '数量', '単位', '運賃', '高速料金', '備考']
-WIDTH = (5, 7, 12, 14, 10, 16, 8, 16, 8, 14, 8, 6, 11, 11, 20)
+# 日報1ブロックぶんの列と幅。これを左右2つ並べる。
+BLOCK = ['乗務員', '車番', '積荷', '得意先', '発地', '着地', '備考']
+BWIDTH = (10, 7, 12, 13, 11, 13, 6)
 
-# テンプレートの『記入例』シートに入れる見本。列順は COLS と同じ。
+# テンプレートの『記入例』に入れる見本。列順は COLS と同じ。
 EXAMPLES = [
-    ('2026/9/10', '日進運輸', 'A-101', 46, '宇都宮工場', '08:00',
-     '川崎倉庫', '13:30', '鋼材', 8, 't', 48000, 3200, ''),
-    ('2026/9/10', '日進運輸', 'A-102', 46, '川崎倉庫', '14:30',
-     '宇都宮工場', '19:00', '空', None, '', 12000, 3200, '復便'),
-    ('2026/9/10', '北関ロジ', 'H-21', None, '足利工場', '10:00',
-     '三郷DC', '14:00', '紙製品', 20, 't', 61000, 0, '車両手配中'),
+    ('2026/9/10', '関', 1, 5022, '玉ねぎ', '鈴与', '日立', '豊洲', ''),
+    ('2026/9/10', '関', 2, 5022, '食品', '鈴与', '桶川市', '常陸那珂', ''),
+    ('2026/9/10', '芳賀', 1, 1956, 'チーズ', '鈴与', '日立', '阿見', ''),
+    ('2026/9/10', '芳賀', 2, 1956, '代用乳', '鈴与', '高崎市', '日立', ''),
+    ('2026/9/10', '芳賀', 3, 1956, '紙製品', '鈴与', 'いわき市', '常陸那珂', ''),
+    ('2026/9/10', '伊垣', 1, 8816, 'トマト', '豊総合物流', '大洗', '', '着地未定'),
+    ('2026/9/10', '', 1, '', '玉葱', '大晴通商', '日立', '豊洲', '乗務員未定'),
 ]
+
+# テンプレートに入れておくマスタの初期値。実際の日報から起こしたもの。
+DRIVERS = [
+    ('関', 5022), ('鶴田', 2039), ('伊垣', 8816), ('横須賀', 2185),
+    ('仲林', 1464), ('海老澤', 8815), ('芳賀', 1956), ('砂押', 1107),
+    ('小林', 8007), ('志賀', 2145), ('宇佐美', 1957), ('萩野間', 1925),
+    ('木村', 9480), ('高橋', 5164), ('山崎', 1523), ('根本', 5159),
+    ('安野', 3134), ('関根', 1000), ('神長', 3069), ('小堀内', 6891),
+    ('吉成', None), ('山崎正二', None), ('石川', None),
+]
+CUSTOMERS = ['鈴与', 'エアウォーター', '豊総合物流', 'ロードリーム',
+             '大晴通商', '光洋運輸', '行方運送', '東亜物産', 'OOCL']
 
 
 def to_date(v):
@@ -52,54 +67,43 @@ def to_date(v):
     if isinstance(v, datetime.date):
         return v
     if isinstance(v, str) and v.strip():
-        s = v.strip().replace('-', '/')
-        y, m, d = (int(x) for x in s.split('/'))
+        y, m, d = (int(x) for x in v.strip().replace('-', '/').split('/'))
         return datetime.date(y, m, d)
     return None
 
 
-def fmt_time(v):
-    """セルの値を 'HH:MM' にする。空欄はそのまま空欄。"""
-    if isinstance(v, (datetime.datetime, datetime.time)):
-        return '%02d:%02d' % (v.hour, v.minute)
-    return str(v).strip() if v not in (None, '') else None
+def wareki(d):
+    """date -> '令和 8年  9月 10日 （木）'。令和1年 = 2019年。"""
+    return '令和 %d年　%d月　%d日　（%s）' % (
+        d.year - 2018, d.month, d.day, WEEK[d.weekday()])
 
 
-def to_int(v):
-    """金額・数量セルを数値にする。空欄・文字列は 0 扱いにしない（None を返す）。"""
-    if isinstance(v, (int, float)):
-        return v
-    if isinstance(v, str):
-        s = v.strip().replace(',', '').replace('￥', '').replace('¥', '')
-        if s.lstrip('-').isdigit():
-            return int(s)
-    return None
+def blank(v):
+    return v in (None, '')
 
 
 def read_rows(ws, ncol, start=2):
     """ヘッダ行を飛ばして値だけを返す。全列空欄の行は読み飛ばす。"""
     for row in ws.iter_rows(min_row=start, max_col=ncol, values_only=True):
-        if any(v not in (None, '') for v in row):
+        if any(not blank(v) for v in row):
             yield list(row) + [None] * (ncol - len(row))
 
 
 def load(path):
-    """入力ブックを読み、明細と各マスタを返す。"""
+    """入力ブックを読み、明細・乗務員の並び順・得意先マスタを返す。"""
     wb = openpyxl.load_workbook(path, data_only=True)
     if '配車入力' not in wb.sheetnames:
         raise SystemExit('『配車入力』シートがありません: %s' % path)
 
-    cars = {}
-    if '車両マスタ' in wb.sheetnames:
-        for car, driver, kind, load_t in read_rows(wb['車両マスタ'], 4):
-            if car is not None:
-                cars[car] = dict(driver=driver or '', kind=kind or '', load=load_t)
+    order, cars = [], {}
+    if '乗務員マスタ' in wb.sheetnames:
+        for name, car, note in read_rows(wb['乗務員マスタ'], 3):
+            if not blank(name):
+                order.append(name)
+                cars[name] = car
 
-    owners = {}
-    if '荷主マスタ' in wb.sheetnames:
-        for short, full in read_rows(wb['荷主マスタ'], 2):
-            if short is not None:
-                owners[short] = full or short
+    customers = [c for c, in ((r[0],) for r in
+                 read_rows(wb['得意先マスタ'], 1))] if '得意先マスタ' in wb.sheetnames else []
 
     recs = []
     for i, r in enumerate(read_rows(wb['配車入力'], len(COLS)), 2):
@@ -107,185 +111,200 @@ def load(path):
         if d is None:
             raise SystemExit('配車入力 %d行目: 日付が読めません（%r）' % (i, r[0]))
         recs.append(dict(
-            date=d, owner=r[1] or '', no=r[2], car=r[3],
-            from_=r[4] or '', from_t=fmt_time(r[5]),
-            to_=r[6] or '', to_t=fmt_time(r[7]),
-            item=r[8] or '', qty=to_int(r[9]), unit=r[10] or '',
-            fare=to_int(r[11]) or 0, toll=to_int(r[12]) or 0,
-            note=r[13] or '', row=i))
-    return recs, cars, owners
+            date=d, driver=r[1] or '', trip=r[2], car=r[3],
+            item=r[4] or '', cust=r[5] or '', from_=r[6] or '',
+            to_=r[7] or '', note=r[8] or '', row=i))
+    return recs, order, cars, customers
 
 
-def car_key(car):
-    """車番の並び順。数値は数値順、それ以外（未配車など）は最後にまとめる。"""
-    return (0, car, '') if isinstance(car, int) else (1, 0, str(car))
+def group(recs, order):
+    """乗務員ごとに便をまとめ、マスタの表示順に並べる。
+
+    乗務員が空欄の便は『未配車』としてまとめ、必ず最後に置く。
+    マスタに無い乗務員はマスタ掲載分の後ろに、入力に出てきた順で続ける。
+    """
+    trips = collections.defaultdict(list)
+    seen = []
+    for r in recs:
+        name = r['driver'] if not blank(r['driver']) else None
+        if name not in trips:
+            seen.append(name)
+        trips[name].append(r)
+
+    for v in trips.values():
+        # 便No が空欄でも入力順を保てるよう、行番号を第2キーにする
+        v.sort(key=lambda r: (r['trip'] if isinstance(r['trip'], int) else 99, r['row']))
+
+    ranked = [n for n in order if n in trips]
+    ranked += [n for n in seen if n is not None and n not in order]
+    if None in trips:
+        ranked.append(None)
+    return [(n, trips[n]) for n in ranked]
 
 
-def style(cell, b=False, sz=10, align=None, fmt=None, fill=None):
-    cell.font = Font(name=FONT, sz=sz, b=b)
+def style(cell, b=False, sz=10, align=None, fill=None, color=None):
+    cell.font = Font(name=FONT, sz=sz, b=b, color=color)
     if align:
         cell.alignment = Alignment(horizontal=align, vertical='center')
-    if fmt:
-        cell.number_format = fmt
     if fill:
         cell.fill = PatternFill('solid', fgColor=fill)
     return cell
 
 
-def write_header(ws, head, row=1, fill='DDEBF7'):
-    for i, h in enumerate(head, 1):
-        c = style(ws.cell(row, i, h), b=True, sz=11, align='center', fill=fill)
-        c.border = Border(bottom=GRAY)
-
-
-def build_nippo(wb, day, recs, cars):
-    """1日分の配車日報シートを作る。未配車の便は末尾に色付きで出す。"""
+def build_nippo(wb, day, recs, order, tanto, spacer):
+    """実際の用紙と同じ左右2ブロックの日報シートを作る。"""
     ws = wb.create_sheet('配車日報')
+    ncol = len(BLOCK) * 2
+
     ws['A1'] = '配　車　日　報'
-    style(ws['A1'], b=True, sz=16, align='center')
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(HEAD))
+    style(ws['A1'], b=True, sz=18, align='center')
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
+    ws.row_dimensions[1].height = 28
 
-    ws['A2'] = '%d年%d月%d日（%s）' % (day.year, day.month, day.day, WEEK[day.weekday()])
-    style(ws['A2'], b=True, sz=12)
-    ws.cell(2, len(HEAD), '作成 %s' % datetime.date.today().strftime('%Y/%m/%d'))
-    style(ws.cell(2, len(HEAD)), sz=9, align='right')
+    ws['A2'] = wareki(day)
+    style(ws['A2'], b=True, sz=14)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(BLOCK))
+    if tanto:
+        c = ws.cell(2, len(BLOCK) + 1, '担当　%s　様' % tanto)
+        style(c, sz=11, align='right')
+        ws.merge_cells(start_row=2, start_column=len(BLOCK) + 1,
+                       end_row=2, end_column=ncol)
+    ws.row_dimensions[2].height = 22
 
-    write_header(ws, HEAD, row=4)
+    for i, h in enumerate(BLOCK * 2, 1):
+        c = style(ws.cell(3, i, h), b=True, sz=10, align='center', fill='F2F2F2')
+        c.border = BOX
+    ws.row_dimensions[3].height = 20
 
-    # 車番順（未配車は最後）→ 積時刻順。同じ車番はひとかたまりで見せる。
-    assigned = [r for r in recs if r['car'] not in (None, '')]
-    unassigned = [r for r in recs if r['car'] in (None, '')]
-    assigned.sort(key=lambda r: (car_key(r['car']), r['from_t'] or '', str(r['no'] or '')))
+    row = 4
+    for name, trips in group(recs, order):
+        unassigned = name is None
+        head, rest = trips[0], trips[1:]
+        # ブロックの高さは「右に並べる2便目以降の数」で決まる。1便だけなら1行。
+        height = max(1, len(rest))
+        for k in range(height):
+            left = head if k == 0 else None
+            right = rest[k] if k < len(rest) else None
+            for side, rec in ((0, left), (1, right)):
+                base = side * len(BLOCK)
+                vals = ['' if rec is None else v for v in (
+                    name or '未配車', rec and rec['car'], rec and rec['item'],
+                    rec and rec['cust'], rec and rec['from_'],
+                    rec and rec['to_'], rec and rec['note'])]
+                if rec is None:
+                    vals = [''] * len(BLOCK)
+                for i, v in enumerate(vals, base + 1):
+                    c = style(ws.cell(row, i, v if v != '' else None), sz=10)
+                    c.border = BOX
+                    if i - base in (1, 2, 7):
+                        c.alignment = Alignment(horizontal='center', vertical='center')
+                    if unassigned and rec is not None:
+                        c.fill = PatternFill('solid', fgColor='FCE4E4')
+            ws.row_dimensions[row].height = 20
+            row += 1
+        if spacer:
+            for i in range(1, ncol + 1):
+                ws.cell(row, i).border = BOX
+            ws.row_dimensions[row].height = 14
+            row += 1
 
-    row, n = 5, 0
-    prev_car = object()
-    for r in assigned + unassigned:
-        n += 1
-        car = r['car']
-        info = cars.get(car, {})
-        note = r['note']
-        if car in (None, ''):
-            note = '／'.join(x for x in ('※未配車', note) if x)
-        elif car not in cars:
-            note = '／'.join(x for x in ('※車両マスタ未登録', note) if x)
+    n_un = sum(1 for r in recs if blank(r['driver']))
+    if n_un:
+        style(ws.cell(row, 1, '※未配車が %d 便あります' % n_un),
+              b=True, sz=11, color='C00000')
 
-        vals = [n, car, info.get('driver', ''), r['owner'], r['no'],
-                r['from_'], r['from_t'], r['to_'], r['to_t'],
-                r['item'], r['qty'], r['unit'], r['fare'], r['toll'], note]
-        for i, v in enumerate(vals, 1):
-            c = style(ws.cell(row, i, v), sz=10)
-            if i in (1, 2, 7, 9, 12):
-                c.alignment = Alignment(horizontal='center')
-            if car in (None, ''):
-                c.fill = PatternFill('solid', fgColor='FCE4E4')
-            # 車番が変わる行の上に区切り線を引く
-            if car != prev_car and row > 5:
-                c.border = Border(top=GRAY)
-        style(ws.cell(row, 13), fmt=YEN)
-        style(ws.cell(row, 14), fmt=YEN)
-        prev_car = car
-        row += 1
-
-    style(ws.cell(row, 12, '合計'), b=True, sz=11, align='right')
-    style(ws.cell(row, 13, sum(r['fare'] for r in recs)), b=True, sz=11, fmt=YEN)
-    style(ws.cell(row, 14, sum(r['toll'] for r in recs)), b=True, sz=11, fmt=YEN)
-    for i in range(1, len(HEAD) + 1):
-        ws.cell(row, i).border = Border(top=GRAY, bottom=GRAY)
-
-    if unassigned:
-        row += 1
-        style(ws.cell(row, 1, '※未配車が %d 件あります' % len(unassigned)),
-              b=True, sz=11).font = Font(name=FONT, sz=11, b=True, color='C00000')
-
-    for i, w in enumerate(WIDTH, 1):
+    for i, w in enumerate(BWIDTH * 2, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    ws.freeze_panes = 'A5'
+    ws.freeze_panes = 'A4'
     ws.page_setup.orientation = 'landscape'
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
     ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
+    ws.page_setup.fitToHeight = 1  # 1日分が必ず1ページに収まるようにする
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.print_title_rows = '4:4'
+    ws.print_title_rows = '3:3'
     return ws
 
 
-def build_summary(wb, recs, cars):
-    """車番別・荷主別の集計シートを作る。"""
-    ws = wb.create_sheet('車番別集計')
-    write_header(ws, ['車番', 'ドライバー', '便数', '運賃', '高速料金', '差引'])
-    by_car = collections.defaultdict(list)
-    for r in recs:
-        by_car[r['car'] if r['car'] not in (None, '') else '未配車'].append(r)
+def build_summary(wb, recs, order, cars):
+    """乗務員別・得意先別の便数集計を作る。"""
+    ws = wb.create_sheet('乗務員別集計')
+    for i, h in enumerate(['乗務員', '車番', '便数', '積荷', '得意先'], 1):
+        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='DDEBF7').border = BOX
     row = 2
-    for car in sorted(by_car, key=car_key):
-        rs = by_car[car]
-        fare, toll = sum(r['fare'] for r in rs), sum(r['toll'] for r in rs)
-        vals = [car, cars.get(car, {}).get('driver', ''), len(rs), fare, toll, fare - toll]
+    for name, trips in group(recs, order):
+        used = sorted({str(t['car']) for t in trips if not blank(t['car'])})
+        vals = [name or '未配車', '・'.join(used), len(trips),
+                '／'.join(t['item'] for t in trips if t['item']),
+                '／'.join(sorted({t['cust'] for t in trips if t['cust']}))]
         for i, v in enumerate(vals, 1):
             style(ws.cell(row, i, v), sz=10)
-        for i in (4, 5, 6):
-            ws.cell(row, i).number_format = YEN
         row += 1
-    style(ws.cell(row, 2, '合計'), b=True, sz=11, align='right')
+    style(ws.cell(row, 1, '合計'), b=True, sz=11, align='right')
     style(ws.cell(row, 3, len(recs)), b=True, sz=11)
-    style(ws.cell(row, 4, sum(r['fare'] for r in recs)), b=True, sz=11, fmt=YEN)
-    style(ws.cell(row, 5, sum(r['toll'] for r in recs)), b=True, sz=11, fmt=YEN)
-    style(ws.cell(row, 6, sum(r['fare'] - r['toll'] for r in recs)), b=True, sz=11, fmt=YEN)
-    for col, w in zip('ABCDEF', (8, 14, 7, 12, 12, 12)):
+    for col, w in zip('ABCDE', (12, 14, 7, 26, 26)):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = 'A2'
 
-    ws = wb.create_sheet('荷主別集計')
-    write_header(ws, ['荷主', '便数', '運賃'])
-    by_owner = collections.Counter()
-    cnt = collections.Counter()
+    ws = wb.create_sheet('得意先別集計')
+    for i, h in enumerate(['得意先', '便数', '乗務員'], 1):
+        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='DDEBF7').border = BOX
+    cnt = collections.Counter(r['cust'] or '（未記入）' for r in recs)
+    who = collections.defaultdict(list)
     for r in recs:
-        by_owner[r['owner']] += r['fare']
-        cnt[r['owner']] += 1
+        d = r['driver'] or '未配車'
+        if d not in who[r['cust'] or '（未記入）']:
+            who[r['cust'] or '（未記入）'].append(d)
     row = 2
-    for owner, fare in sorted(by_owner.items(), key=lambda kv: -kv[1]):
-        for i, v in enumerate([owner, cnt[owner], fare], 1):
+    for cust, n in cnt.most_common():
+        for i, v in enumerate([cust, n, '・'.join(who[cust])], 1):
             style(ws.cell(row, i, v), sz=10)
-        ws.cell(row, 3).number_format = YEN
         row += 1
     style(ws.cell(row, 1, '合計'), b=True, sz=11, align='right')
     style(ws.cell(row, 2, len(recs)), b=True, sz=11)
-    style(ws.cell(row, 3, sum(by_owner.values())), b=True, sz=11, fmt=YEN)
-    for col, w in zip('ABC', (20, 7, 12)):
+    for col, w in zip('ABC', (18, 7, 40)):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = 'A2'
 
 
 def make_template(path):
-    """空の入力ブックを作る。6社ぶんの荷主マスタの雛形付き。"""
+    """空の入力ブックを作る。乗務員・得意先マスタは実際の日報から起こした初期値入り。"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = '配車入力'
-    write_header(ws, COLS)
-    for i, w in enumerate((11, 14, 10, 7, 16, 8, 16, 8, 14, 8, 6, 11, 11, 20), 1):
+    for i, h in enumerate(COLS, 1):
+        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='DDEBF7').border = BOX
+    for i, w in enumerate((11, 11, 5, 8, 13, 14, 12, 14, 20), 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = 'A2'
 
-    ws = wb.create_sheet('車両マスタ')
-    write_header(ws, ['車番', 'ドライバー', '車種', '最大積載(kg)'], fill='E2EFDA')
-    for col, w in zip('ABCD', (8, 14, 14, 13)):
+    ws = wb.create_sheet('乗務員マスタ')
+    for i, h in enumerate(['乗務員', '主な車番', '備考'], 1):
+        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='E2EFDA').border = BOX
+    for name, car in DRIVERS:
+        ws.append([name, car, None])
+    for col, w in zip('ABC', (12, 10, 24)):
         ws.column_dimensions[col].width = w
+    ws.cell(len(DRIVERS) + 3, 1, '※この並び順が日報の行順になります。')
+    ws.cell(len(DRIVERS) + 4, 1, '※車番は目安です。実際の車番は便ごとに配車入力へ。')
 
-    ws = wb.create_sheet('荷主マスタ')
-    write_header(ws, ['荷主(略称)', '正式名称'], fill='E2EFDA')
-    for col, w in zip('AB', (16, 28)):
-        ws.column_dimensions[col].width = w
+    ws = wb.create_sheet('得意先マスタ')
+    style(ws.cell(1, 1, '得意先'), b=True, sz=11, align='center', fill='E2EFDA').border = BOX
+    for c in CUSTOMERS:
+        ws.append([c])
+    ws.column_dimensions['A'].width = 18
 
     # 記入例は『配車入力』に置くと日報に混ざるため、別シートに分ける。
     ws = wb.create_sheet('記入例')
-    write_header(ws, COLS, fill='FFF2CC')
+    for i, h in enumerate(COLS, 1):
+        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='FFF2CC').border = BOX
     for r in EXAMPLES:
         ws.append(list(r))
-    for i, w in enumerate((11, 14, 10, 7, 16, 8, 16, 8, 14, 8, 6, 11, 11, 20), 1):
+    for i, w in enumerate((11, 11, 5, 8, 13, 14, 12, 14, 20), 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    ws.append([])
-    ws.append(['※このシートは見本です。実際の入力は『配車入力』シートへ。'])
-    ws.append(['※車番を空欄にすると日報で「未配車」として赤く出ます（配車漏れ確認用）。'])
+    for msg in ('', '※このシートは見本です。実際の入力は『配車入力』シートへ。',
+                '※便＝1便目・2便目。日報では1便目が左、2便目以降が右に並びます。',
+                '※乗務員を空欄にすると日報の最後に「未配車」として赤く出ます。'):
+        ws.append([msg])
 
     wb.save(path)
     print('入力テンプレートを作りました: %s' % path)
@@ -296,6 +315,8 @@ def main():
     ap.add_argument('--input', default=IN, help='入力ブック（既定: 配車入力.xlsx）')
     ap.add_argument('--date', help='対象日 YYYY-MM-DD（既定: 入力にある全日付）')
     ap.add_argument('--outdir', default=ROOT, help='出力先ディレクトリ')
+    ap.add_argument('--tanto', default='', help='担当者名（日報の右上に入る）')
+    ap.add_argument('--spacer', action='store_true', help='乗務員ごとに空行を入れる')
     ap.add_argument('--template', action='store_true', help='入力テンプレートを作る')
     args = ap.parse_args()
 
@@ -303,7 +324,7 @@ def main():
         make_template(args.input)
         return
 
-    recs, cars, owners = load(args.input)
+    recs, order, cars, customers = load(args.input)
     if not recs:
         raise SystemExit('『配車入力』シートにデータがありません: %s' % args.input)
     days = sorted({r['date'] for r in recs})
@@ -317,15 +338,14 @@ def main():
         todays = [r for r in recs if r['date'] == day]
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
-        build_nippo(wb, day, todays, cars)
-        build_summary(wb, todays, cars)
+        build_nippo(wb, day, todays, order, args.tanto, args.spacer)
+        build_summary(wb, todays, order, cars)
         out = os.path.join(args.outdir, '配車日報_%s.xlsx' % day.strftime('%Y%m%d'))
         wb.save(out)
-        un = sum(1 for r in todays if r['car'] in (None, ''))
-        print('%s  %d便  運賃￥%s  高速￥%s%s' % (
-            day, len(todays), format(sum(r['fare'] for r in todays), ','),
-            format(sum(r['toll'] for r in todays), ','),
-            '  ※未配車 %d件' % un if un else ''))
+        un = sum(1 for r in todays if blank(r['driver']))
+        drivers = len({r['driver'] for r in todays if not blank(r['driver'])})
+        print('%s  %d便 / 乗務員%d名%s' % (
+            day, len(todays), drivers, '  ※未配車 %d便' % un if un else ''))
         print('  -> %s' % out)
 
 
