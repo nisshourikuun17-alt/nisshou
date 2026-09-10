@@ -16,7 +16,7 @@
     python scripts/haisha_nippo.py              入力にある日付ぶんの日報を作る
     python scripts/haisha_nippo.py --date 2026-09-10 --tanto 藁科
 """
-import argparse, collections, datetime, os, re
+import argparse, collections, datetime, html, os, re
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -336,6 +336,251 @@ def dropdown(ws, src_sheet, src_range, target):
     dv.add(target)
 
 
+
+# HTML日報のひな形。Excelを開けない端末でも見られるよう、印刷にも耐える組みにする。
+TEMPLATE = """<title>%(title)s</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<style>
+:root{
+  --paper:#FBFAF8; --card:#FFFFFF; --ink:#1C2229; --muted:#6E6A63;
+  --rule:#DCD8D0; --rule-firm:#B4AEA3; --accent:#1F4E5F; --accent-soft:#E4EDEF;
+  --alert:#A3352C; --alert-soft:#F6E4E1;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#14181C; --card:#1A1F25; --ink:#E7E4DE; --muted:#9A968E;
+    --rule:#2C333A; --rule-firm:#49535D; --accent:#7FB8C6; --accent-soft:#1E2A30;
+    --alert:#E08279; --alert-soft:#2E1E1D;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#14181C; --card:#1A1F25; --ink:#E7E4DE; --muted:#9A968E;
+  --rule:#2C333A; --rule-firm:#49535D; --accent:#7FB8C6; --accent-soft:#1E2A30;
+  --alert:#E08279; --alert-soft:#2E1E1D;
+}
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink); margin:0;
+  font-family:"Zen Kaku Gothic New",system-ui,sans-serif;
+  font-size:15px; line-height:1.6;
+}
+.wrap{max-width:1400px; margin:0 auto; padding:28px 16px 64px}
+header.top{
+  display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px 20px;
+  border-bottom:2px solid var(--rule-firm); padding-bottom:14px;
+}
+h1{
+  font-family:"Shippori Mincho",serif; font-weight:700;
+  font-size:clamp(26px,4.4vw,38px); letter-spacing:.34em;
+  margin:0 auto 0 0; text-indent:.34em;
+}
+.date{font-family:"Shippori Mincho",serif; font-size:clamp(15px,2.4vw,19px)}
+.tanto{color:var(--muted); font-size:14px}
+.stats{display:flex; flex-wrap:wrap; gap:10px; margin:18px 0 24px; padding:0; list-style:none}
+.stats li{
+  display:flex; align-items:baseline; gap:7px;
+  border:1px solid var(--rule); border-radius:2px; background:var(--card);
+  padding:7px 13px;
+}
+.stats b{font-size:20px; font-variant-numeric:tabular-nums}
+.stats span{color:var(--muted); font-size:12.5px; letter-spacing:.06em}
+.alert{
+  background:var(--alert-soft); color:var(--alert);
+  border:1px solid var(--alert); border-radius:2px; padding:7px 13px; font-weight:700;
+}
+.scroll{overflow-x:auto; border:1px solid var(--rule-firm); background:var(--card)}
+table{border-collapse:collapse; width:100%%; font-size:13px}
+th,td{border:1px solid var(--rule); padding:5px 7px; text-align:left; vertical-align:middle}
+th{
+  background:var(--accent-soft); color:var(--accent); font-weight:700;
+  font-size:11.5px; letter-spacing:.08em; white-space:nowrap; text-align:center;
+}
+th:nth-child(7),td:nth-child(7){border-right:2px solid var(--rule-firm)}
+td.nm{font-weight:700; white-space:nowrap; text-align:center}
+td.num{font-variant-numeric:tabular-nums; text-align:center; white-space:nowrap}
+td.sm{font-size:11.5px; color:var(--muted)}
+td.cust{color:var(--accent); font-weight:500}
+tr.new td{border-top:2px solid var(--rule-firm)}
+tr.un td{background:var(--alert-soft)}
+.cards{display:none; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px}
+.cards article{border:1px solid var(--rule); background:var(--card); border-radius:2px}
+.cards article.un{border-color:var(--alert)}
+.cards header{
+  display:flex; align-items:baseline; gap:10px;
+  padding:9px 13px; border-bottom:1px solid var(--rule); background:var(--accent-soft);
+}
+.cards h3{margin:0; font-size:17px; font-weight:700}
+.cards header .num{
+  margin-left:auto; font-variant-numeric:tabular-nums;
+  color:var(--accent); font-size:13px;
+}
+.cards ol{margin:0; padding:4px 0; list-style:none}
+.cards li{display:flex; gap:10px; padding:8px 13px; align-items:flex-start}
+.cards li+li{border-top:1px dashed var(--rule)}
+.leg{
+  flex:none; font-size:11px; color:var(--muted); border:1px solid var(--rule);
+  border-radius:2px; padding:1px 6px; margin-top:3px;
+}
+.cards b{font-weight:700}
+.cards .c{color:var(--accent); font-size:12.5px; margin-left:8px}
+.route{font-size:13.5px; margin-top:2px}
+.ar{color:var(--muted); margin:0 4px}
+.note{font-size:12px; color:var(--muted); margin-top:2px}
+h2{
+  font-family:"Shippori Mincho",serif; font-size:19px; font-weight:500;
+  letter-spacing:.1em; margin:38px 0 14px;
+  border-bottom:1px solid var(--rule); padding-bottom:7px;
+}
+.bars{list-style:none; margin:0; padding:0; display:grid; gap:7px; max-width:620px}
+.bars li{display:grid; grid-template-columns:8.5em 1fr 2.6em; gap:11px; align-items:center}
+.cn{font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bar{background:var(--accent-soft); height:15px; border-radius:1px}
+.bar i{display:block; height:100%%; background:var(--accent); border-radius:1px}
+.cv{font-variant-numeric:tabular-nums; text-align:right; font-size:13.5px; color:var(--muted)}
+footer{margin-top:44px; color:var(--muted); font-size:12.5px}
+@media (max-width:900px){
+  .scroll{display:none}
+  .cards{display:grid}
+}
+@media print{
+  @page{size:A4 landscape; margin:9mm}
+  body{background:#fff; color:#000; font-size:11px}
+  .wrap{padding:0; max-width:none}
+  .stats,.cards,footer,h2,.bars{display:none}
+  .scroll{overflow:visible; border:none}
+  th{background:#eee !important; color:#000 !important}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important}}
+</style>
+<div class="wrap">
+  <header class="top">
+    <h1>配車日報</h1>
+    <div class="date">%(wareki)s</div>
+    <div class="tanto">%(tanto)s</div>
+  </header>
+
+  <ul class="stats">
+    <li><b>%(n)d</b><span>便</span></li>
+    <li><b>%(drivers)d</b><span>乗務員</span></li>
+    <li><b>%(custs)d</b><span>得意先</span></li>
+    %(un)s
+  </ul>
+
+  <div class="scroll">
+    <table>
+      <thead><tr>%(head)s</tr></thead>
+      <tbody>%(rows)s</tbody>
+    </table>
+  </div>
+  <div class="cards">%(cards)s</div>
+
+  <h2>得意先別の便数</h2>
+  <ul class="bars">%(bars)s</ul>
+
+  <footer>左ブロックが1便目、右ブロックが2便目以降。画面が狭いときは乗務員ごとのカードに切り替わります。</footer>
+</div>
+"""
+
+
+def build_html(day, recs, order, tanto):
+    """日報をHTMLで書き出す。Excelを開けない端末でも見られるようにするため。
+
+    広い画面では用紙と同じ左右2ブロックの表、狭い画面では乗務員ごとの
+    カードに切り替える。14列の表はスマホでは読めないため。
+    """
+    e = lambda v: html.escape('' if blank(v) else str(v))
+    blocks = group(recs, order)
+    n_un = sum(1 for r in recs if blank(r['driver']))
+    drivers = len([1 for n, _ in blocks if n is not None])
+    custs = collections.Counter(r['cust'] or '（未記入）' for r in recs)
+
+    rows = []
+    for name, trips in blocks:
+        head, rest = trips[0], trips[1:]
+        for k in range(max(1, len(rest))):
+            left = head if k == 0 else None
+            right = rest[k] if k < len(rest) else None
+            tds = []
+            for rec in (left, right):
+                if rec is None:
+                    tds.append('<td class="nm"></td>' + '<td></td>' * 6)
+                    continue
+                tds.append(
+                    '<td class="nm">%s</td><td class="num">%s</td><td>%s</td>'
+                    '<td class="cust">%s</td><td>%s</td><td>%s</td><td class="num sm">%s</td>'
+                    % (e(name or '未配車'), e(rec['car']), e(rec['item']), e(rec['cust']),
+                       e(rec['from_']), e(rec['to_']), e(rec['note'])))
+            cls = ' class="new"' if k == 0 else ''
+            cls = ' class="new un"' if (k == 0 and name is None) else cls
+            rows.append('<tr%s>%s</tr>' % (cls, ''.join(tds)))
+
+    cards = []
+    for name, trips in blocks:
+        legs = ''.join(
+            '<li><span class="leg">%d便</span><div><b>%s</b><span class="c">%s</span>'
+            '<div class="route">%s <span class="ar">&rarr;</span> %s</div>%s</div></li>'
+            % (i, e(t['item']), e(t['cust']), e(t['from_']) or '&mdash;',
+               e(t['to_']) or '&mdash;',
+               '<div class="note">%s</div>' % e(t['note']) if not blank(t['note']) else '')
+            for i, t in enumerate(trips, 1))
+        cars = '・'.join(sorted({str(t['car']) for t in trips if not blank(t['car'])}))
+        cards.append('<article%s><header><h3>%s</h3><span class="num">%s</span></header>'
+                     '<ol>%s</ol></article>'
+                     % (' class="un"' if name is None else '',
+                        e(name or '未配車'), e(cars), legs))
+
+    top = max(custs.values()) if custs else 1
+    bars = ''.join(
+        '<li><span class="cn">%s</span><span class="bar"><i style="width:%.1f%%"></i></span>'
+        '<span class="cv">%d</span></li>' % (e(c), n / top * 100, n)
+        for c, n in custs.most_common())
+
+    head = ''.join('<th>%s</th>' % h for h in BLOCK) * 2
+    return TEMPLATE % dict(
+        wareki=e(wareki(day)), tanto=('担当　%s　様' % e(tanto)) if tanto else '',
+        n=len(recs), drivers=drivers, custs=len(custs),
+        un=('<span class="alert">未配車 %d便</span>' % n_un) if n_un else '',
+        head=head, rows=''.join(rows), cards=''.join(cards), bars=bars,
+        title=e('配車日報 %d年%d月%d日' % (day.year, day.month, day.day)))
+
+
+def build_line(day, recs, order):
+    """乗務員ごとのLINE連絡文を作る。1人分ずつコピーして貼れるように区切る。
+
+    車番が全便で同じならヘッダにまとめ、便ごとに違う日は各便に付ける。
+    """
+    d = '%d/%d(%s)' % (day.month, day.day, WEEK[day.weekday()])
+    out = []
+    for name, trips in group(recs, order):
+        if name is None:
+            continue
+        cars = sorted({str(t['car']) for t in trips if not blank(t['car'])})
+        one = cars[0] if len(cars) == 1 else None
+        lines = ['【%s】%sさん' % (d, name)]
+        if one:
+            lines.append('車番 %s' % one)
+        lines.append('')
+        for i, t in enumerate(trips, 1):
+            car = '' if one else ('［%s］' % t['car'] if not blank(t['car']) else '')
+            cust = '（%s）' % t['cust'] if t['cust'] else ''
+            lines.append('%d便 %s%s%s' % (i, car, t['item'], cust))
+            lines.append('　%s → %s' % (t['from_'] or '？', t['to_'] or '？'))
+            if not blank(t['note']):
+                lines.append('　※%s' % t['note'])
+        out.append('\n'.join(lines))
+
+    un = [r for r in recs if blank(r['driver'])]
+    if un:
+        lines = ['【%s】未配車 %d便（連絡先未定）' % (d, len(un)), '']
+        for r in un:
+            lines.append('・%s（%s）%s → %s'
+                         % (r['item'], r['cust'], r['from_'] or '？', r['to_'] or '？'))
+        out.append('\n'.join(lines))
+
+    sep = '\n\n' + '─' * 24 + '\n\n'
+    return sep.join(out) + '\n'
+
+
 def make_template(path):
     """空の入力ブックを作る。マスタは実際の日報から起こした初期値入り。"""
     wb = openpyxl.Workbook()
@@ -423,6 +668,10 @@ def main():
     ap.add_argument('--text', help='読み取りテキストから日報を作る（配車入力は使わない）')
     ap.add_argument('--save-input', action='store_true',
                     help='--text の内容を配車入力シートにも追記する')
+    ap.add_argument('--line', action='store_true',
+                    help='乗務員ごとのLINE連絡文を書き出す')
+    ap.add_argument('--html', action='store_true',
+                    help='ExcelとあわせてHTMLの日報も書き出す')
     ap.add_argument('--template', action='store_true', help='入力テンプレートを作る')
     args = ap.parse_args()
 
@@ -459,6 +708,16 @@ def main():
         print('%s  %d便 / 乗務員%d名%s' % (
             day, len(todays), drivers, '  ※未配車 %d便' % un if un else ''))
         print('  -> %s' % out)
+        if args.line:
+            t = os.path.join(args.outdir, '配車連絡_%s.txt' % day.strftime('%Y%m%d'))
+            with open(t, 'w', encoding='utf-8') as f:
+                f.write(build_line(day, todays, order))
+            print('  -> %s' % t)
+        if args.html:
+            h = out[:-5] + '.html'
+            with open(h, 'w', encoding='utf-8') as f:
+                f.write(build_html(day, todays, order, args.tanto))
+            print('  -> %s' % h)
 
 
 if __name__ == '__main__':
