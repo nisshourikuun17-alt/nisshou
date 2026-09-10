@@ -84,8 +84,11 @@ def to_date(v):
     if isinstance(v, datetime.date):
         return v
     if isinstance(v, str) and v.strip():
-        y, m, d = (int(x) for x in v.strip().replace('-', '/').split('/'))
-        return datetime.date(y, m, d)
+        try:
+            y, m, d = (int(x) for x in v.strip().replace('-', '/').split('/'))
+            return datetime.date(y, m, d)
+        except ValueError:
+            return None   # 日付でない行は呼び出し側で扱う
     return None
 
 
@@ -149,17 +152,24 @@ def load(path, default_date=None):
 def read_text(path, vehicles, default_date=None):
     """読み取りテキストから明細を作る。写真をAIに読ませた結果を貼る想定。
 
-        2026/9/10                       ← 日付行。以降この日付が続く
-        5022  玉ねぎ  鈴与  日立  豊洲     ← 車番 積荷 得意先 発地 着地
-        40ft  9:30  OOCL  大井  水戸市  吉成  6455   ← 6列目=乗務員 7列目=備考
+        2026/9/11                       ← 日付行。以降この日付が続く
+        5203  合板  ホクレン  那珂北埠頭  八街市  根本  09:00必着
+        + 不使用資材は降ろしてください   ← 直前の便に備考を1行足す
+        + 資材：ガッチャ9SET・毛布10枚
 
     区切りはタブでも2文字以上の空白でもよい。空行と # 以降は無視する。
+    運行指図書のように注意事項が多い便は「+」の行を何行でも足せる。
     """
     recs, day = [], default_date
     for i, raw in enumerate(open(path, encoding='utf-8'), 1):
         # 末尾の空欄（着地なしなど）を消さないよう、改行だけ落として分割する
         line = raw.split('#')[0].rstrip('\r\n')
         if not line.strip():
+            continue
+        if line.lstrip().startswith('+'):
+            if not recs:
+                raise SystemExit('%s %d行目: 「+」の前に便の行が要ります。' % (path, i))
+            recs[-1]['notes'].append(line.lstrip()[1:].strip())
             continue
         cols = [c.strip() for c in (line.split('\t') if '\t' in line
                                     else re.split(r'\s{2,}', line.strip()))]
@@ -179,7 +189,9 @@ def read_text(path, vehicles, default_date=None):
         recs.append(dict(
             date=day, car=car, item=cols[1], cust=cols[2], from_=cols[3],
             to_=cols[4], driver=cols[5] or vehicles.get(cols[0], ''),
-            trip=None, note=cols[6], row=i))
+            trip=None, notes=[cols[6]] if cols[6] else [], row=i))
+    for r in recs:
+        r['note'] = ' / '.join(r['notes'])
     return recs
 
 
@@ -573,8 +585,10 @@ def build_line(day, recs, order):
             lines.append('　積荷　%s%s' % (t['item'] or '未定', cust))
             lines.append('　発地　%s' % (t['from_'] or '未定'))
             lines.append('　着地　%s' % (t['to_'] or '未定'))
-            if not blank(t['note']):
-                lines.append('　備考　%s' % t['note'])
+            # 備考が続くときは2行目以降のラベルを省いて字下げで揃える
+            notes = t.get('notes') or ([t['note']] if not blank(t['note']) else [])
+            for k, note in enumerate(notes):
+                lines.append('%s%s' % ('　備考　' if k == 0 else '　　　　', note))
             lines.append('')
         lines.append(LINE_CLOSING)
         out.append('\n'.join(lines))
