@@ -20,6 +20,7 @@ import argparse, collections, datetime, os
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.properties import PageSetupProperties
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,7 +31,11 @@ WEEK = '月火水木金土日'
 BOX  = Border(*[Side(style='thin', color='000000')] * 4)
 
 # 『配車入力』シートの列順。テンプレート作成と読み込みで共用する。
-COLS = ['日付', '乗務員', '便', '車番', '積荷', '得意先', '発地', '着地', '備考']
+# B〜F列（車番・積荷・得意先・発地・着地）だけ打てば済むよう、この5つを隣に並べる。
+# 日付は上の行から引き継ぎ、乗務員は車番マスタから、便は入力順から自動で決まる。
+COLS = ['日付', '車番', '積荷', '得意先', '発地', '着地', '乗務員', '便', '備考']
+TYPE_COLS = (2, 6)          # 打ち込む列の範囲（車番〜着地）
+CWIDTH = (11, 8, 13, 14, 12, 14, 11, 5, 20)
 
 # 日報1ブロックぶんの列と幅。これを左右2つ並べる。
 BLOCK = ['乗務員', '車番', '積荷', '得意先', '発地', '着地', '備考']
@@ -38,23 +43,30 @@ BWIDTH = (10, 7, 12, 13, 11, 13, 6)
 
 # テンプレートの『記入例』に入れる見本。列順は COLS と同じ。
 EXAMPLES = [
-    ('2026/9/10', '関', 1, 5022, '玉ねぎ', '鈴与', '日立', '豊洲', ''),
-    ('2026/9/10', '関', 2, 5022, '食品', '鈴与', '桶川市', '常陸那珂', ''),
-    ('2026/9/10', '芳賀', 1, 1956, 'チーズ', '鈴与', '日立', '阿見', ''),
-    ('2026/9/10', '芳賀', 2, 1956, '代用乳', '鈴与', '高崎市', '日立', ''),
-    ('2026/9/10', '芳賀', 3, 1956, '紙製品', '鈴与', 'いわき市', '常陸那珂', ''),
-    ('2026/9/10', '伊垣', 1, 8816, 'トマト', '豊総合物流', '大洗', '', '着地未定'),
-    ('2026/9/10', '', 1, '', '玉葱', '大晴通商', '日立', '豊洲', '乗務員未定'),
+    ('2026/9/10', 5022, '玉ねぎ', '鈴与', '日立', '豊洲', '', '', ''),
+    ('', 5022, '食品', '鈴与', '桶川市', '常陸那珂', '', '', ''),
+    ('', 1956, 'チーズ', '鈴与', '日立', '阿見', '', '', ''),
+    ('', 1956, '代用乳', '鈴与', '高崎市', '日立', '', '', ''),
+    ('', 1956, '紙製品', '鈴与', 'いわき市', '常陸那珂', '', '', ''),
+    ('', 8816, 'トマト', '豊総合物流', '大洗', '', '', '', '着地未定'),
+    ('', 2403, '雑貨', 'ロードリーム', '相模原市', '常陸那珂', '仲林', '', '代車のため乗務員を明記'),
+    ('', '', '玉葱', '大晴通商', '日立', '豊洲', '', '', '車番未定→未配車に出る'),
 ]
 
 # テンプレートに入れておくマスタの初期値。実際の日報から起こしたもの。
-DRIVERS = [
-    ('関', 5022), ('鶴田', 2039), ('伊垣', 8816), ('横須賀', 2185),
-    ('仲林', 1464), ('海老澤', 8815), ('芳賀', 1956), ('砂押', 1107),
-    ('小林', 8007), ('志賀', 2145), ('宇佐美', 1957), ('萩野間', 1925),
-    ('木村', 9480), ('高橋', 5164), ('山崎', 1523), ('根本', 5159),
-    ('安野', 3134), ('関根', 1000), ('神長', 3069), ('小堀内', 6891),
-    ('吉成', None), ('山崎正二', None), ('石川', None),
+DRIVERS = ['関', '鶴田', '伊垣', '横須賀', '仲林', '海老澤', '芳賀', '砂押',
+           '小林', '志賀', '宇佐美', '萩野間', '木村', '高橋', '山崎', '根本',
+           '安野', '関根', '神長', '小堀内', '吉成', '山崎正二', '石川']
+
+# 車番 -> 乗務員。車番を打てば乗務員が決まるので、入力は車番だけで済む。
+# 代車で普段と違う人が乗る日は『配車入力』の乗務員欄に直接書けば、そちらが優先。
+VEHICLES = [
+    (5022, '関'), (2039, '鶴田'), (8816, '伊垣'), (2185, '横須賀'),
+    (1464, '仲林'), (2403, '仲林'), (8815, '海老澤'), (3655, '海老澤'),
+    (1956, '芳賀'), (1107, '砂押'), (8007, '小林'), (2145, '志賀'),
+    (1957, '宇佐美'), (5135, '宇佐美'), (1925, '萩野間'), (9480, '木村'),
+    (1983, '木村'), (5164, '高橋'), (1523, '山崎'), (5159, '根本'),
+    (3134, '安野'), (1000, '関根'), (3069, '神長'), (6891, '小堀内'),
 ]
 CUSTOMERS = ['鈴与', 'エアウォーター', '豊総合物流', 'ロードリーム',
              '大晴通商', '光洋運輸', '行方運送', '東亜物産', 'OOCL']
@@ -89,32 +101,44 @@ def read_rows(ws, ncol, start=2):
             yield list(row) + [None] * (ncol - len(row))
 
 
-def load(path):
-    """入力ブックを読み、明細・乗務員の並び順・得意先マスタを返す。"""
+def master(wb, name, ncol):
+    """マスタシートを読む。『※』で始まる注意書きの行は読み飛ばす。"""
+    if name not in wb.sheetnames:
+        return []
+    return [r for r in read_rows(wb[name], ncol)
+            if not blank(r[0]) and not str(r[0]).startswith('※')]
+
+
+def load(path, default_date=None):
+    """入力ブックを読み、明細・乗務員の並び順・車番マスタ・得意先マスタを返す。
+
+    打ち込みを減らすため、空欄は次のように補う。明示的に書けばそちらが優先。
+      日付   … 直前の行から引き継ぐ（1日分なら先頭行に1回書けばよい）
+      乗務員 … 車番マスタから引く（代車の日は乗務員欄に直接書く）
+      便     … 同じ乗務員の中で出てきた順に1便目・2便目…とする
+    """
     wb = openpyxl.load_workbook(path, data_only=True)
     if '配車入力' not in wb.sheetnames:
         raise SystemExit('『配車入力』シートがありません: %s' % path)
 
-    order, cars = [], {}
-    if '乗務員マスタ' in wb.sheetnames:
-        for name, car, note in read_rows(wb['乗務員マスタ'], 3):
-            if not blank(name):
-                order.append(name)
-                cars[name] = car
+    order = [r[0] for r in master(wb, '乗務員マスタ', 2)]
+    vehicles = {str(r[0]).strip(): r[1] or '' for r in master(wb, '車番マスタ', 2)}
+    customers = [r[0] for r in master(wb, '得意先マスタ', 1)]
 
-    customers = [c for c, in ((r[0],) for r in
-                 read_rows(wb['得意先マスタ'], 1))] if '得意先マスタ' in wb.sheetnames else []
-
-    recs = []
+    recs, last = [], default_date
     for i, r in enumerate(read_rows(wb['配車入力'], len(COLS)), 2):
-        d = to_date(r[0])
+        d = to_date(r[0]) or last
         if d is None:
-            raise SystemExit('配車入力 %d行目: 日付が読めません（%r）' % (i, r[0]))
+            raise SystemExit('配車入力 %d行目: 日付が決まりません。'
+                             '先頭行の日付欄を埋めるか --date を指定してください。' % i)
+        last = d
+        car = r[1]
+        driver = r[6] if not blank(r[6]) else vehicles.get(str(car).strip(), '')
         recs.append(dict(
-            date=d, driver=r[1] or '', trip=r[2], car=r[3],
-            item=r[4] or '', cust=r[5] or '', from_=r[6] or '',
-            to_=r[7] or '', note=r[8] or '', row=i))
-    return recs, order, cars, customers
+            date=d, car=car, item=r[2] or '', cust=r[3] or '',
+            from_=r[4] or '', to_=r[5] or '', driver=driver or '',
+            trip=r[7], note=r[8] or '', row=i))
+    return recs, order, vehicles, customers
 
 
 def group(recs, order):
@@ -266,26 +290,50 @@ def build_summary(wb, recs, order, cars):
     ws.freeze_panes = 'A2'
 
 
+def dropdown(ws, src_sheet, src_range, target):
+    """マスタを参照するプルダウンを付ける。打ち間違いと打鍵数を減らす。"""
+    dv = DataValidation(type='list', allow_blank=True,
+                        formula1="='%s'!%s" % (src_sheet, src_range))
+    ws.add_data_validation(dv)
+    dv.add(target)
+
+
 def make_template(path):
-    """空の入力ブックを作る。乗務員・得意先マスタは実際の日報から起こした初期値入り。"""
+    """空の入力ブックを作る。マスタは実際の日報から起こした初期値入り。"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = '配車入力'
+    lo, hi = TYPE_COLS
     for i, h in enumerate(COLS, 1):
-        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='DDEBF7').border = BOX
-    for i, w in enumerate((11, 11, 5, 8, 13, 14, 12, 14, 20), 1):
+        # 打ち込む5列だけ濃い色にして、触る場所をひと目で分かるようにする
+        fill = 'FFD966' if lo <= i <= hi else 'DDEBF7'
+        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill=fill).border = BOX
+    for i, w in enumerate(CWIDTH, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = 'A2'
+    dropdown(ws, '車番マスタ', '$A$2:$A$200', 'B2:B500')
+    dropdown(ws, '得意先マスタ', '$A$2:$A$100', 'D2:D500')
 
     ws = wb.create_sheet('乗務員マスタ')
-    for i, h in enumerate(['乗務員', '主な車番', '備考'], 1):
+    for i, h in enumerate(['乗務員', '備考'], 1):
         style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='E2EFDA').border = BOX
-    for name, car in DRIVERS:
-        ws.append([name, car, None])
-    for col, w in zip('ABC', (12, 10, 24)):
+    for name in DRIVERS:
+        ws.append([name, None])
+    for col, w in zip('AB', (12, 28)):
         ws.column_dimensions[col].width = w
-    ws.cell(len(DRIVERS) + 3, 1, '※この並び順が日報の行順になります。')
-    ws.cell(len(DRIVERS) + 4, 1, '※車番は目安です。実際の車番は便ごとに配車入力へ。')
+    ws.append([])
+    ws.append(['※この並び順が日報の行順になります。'])
+
+    ws = wb.create_sheet('車番マスタ')
+    for i, h in enumerate(['車番', '乗務員'], 1):
+        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='E2EFDA').border = BOX
+    for car, name in VEHICLES:
+        ws.append([car, name])
+    for col, w in zip('AB', (10, 12)):
+        ws.column_dimensions[col].width = w
+    ws.append([])
+    ws.append(['※車番を打つと乗務員が自動で決まります。'])
+    ws.append(['※代車で普段と違う人が乗る日は、配車入力の乗務員欄に直接書いてください。'])
 
     ws = wb.create_sheet('得意先マスタ')
     style(ws.cell(1, 1, '得意先'), b=True, sz=11, align='center', fill='E2EFDA').border = BOX
@@ -296,14 +344,17 @@ def make_template(path):
     # 記入例は『配車入力』に置くと日報に混ざるため、別シートに分ける。
     ws = wb.create_sheet('記入例')
     for i, h in enumerate(COLS, 1):
-        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill='FFF2CC').border = BOX
+        fill = 'FFD966' if lo <= i <= hi else 'FFF2CC'
+        style(ws.cell(1, i, h), b=True, sz=11, align='center', fill=fill).border = BOX
     for r in EXAMPLES:
-        ws.append(list(r))
-    for i, w in enumerate((11, 11, 5, 8, 13, 14, 12, 14, 20), 1):
+        ws.append([v if v != '' else None for v in r])
+    for i, w in enumerate(CWIDTH, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    for msg in ('', '※このシートは見本です。実際の入力は『配車入力』シートへ。',
-                '※便＝1便目・2便目。日報では1便目が左、2便目以降が右に並びます。',
-                '※乗務員を空欄にすると日報の最後に「未配車」として赤く出ます。'):
+    for msg in ('', '※打ち込むのは黄色の5列（車番・積荷・得意先・発地・着地）だけです。',
+                '※日付は1日の先頭行に1回書けば、下の行は同じ日付になります。',
+                '※乗務員は車番マスタから自動で入ります。代車の日だけ手で書いてください。',
+                '※便は同じ乗務員の中で上から順に1便目・2便目…になります。',
+                '※車番を空欄にすると日報の最後に「未配車」として赤く出ます。'):
         ws.append([msg])
 
     wb.save(path)
@@ -324,7 +375,8 @@ def main():
         make_template(args.input)
         return
 
-    recs, order, cars, customers = load(args.input)
+    recs, order, cars, customers = load(
+        args.input, to_date(args.date) if args.date else None)
     if not recs:
         raise SystemExit('『配車入力』シートにデータがありません: %s' % args.input)
     days = sorted({r['date'] for r in recs})
