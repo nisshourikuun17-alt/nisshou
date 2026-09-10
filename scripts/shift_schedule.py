@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ツーマン運行（頭＋助手の2人1組）の月間シフト表を作成する。
+"""ツーマン運行（2人1組）の月間出勤表を作成する。
 
-制約
-  * 1組＝頭1名＋助手1名。平日と土日で出す組数を変えられる。
+  * 1組は必ず頭（運転の主担当）を1名含む。頭が余る日は頭が助手席に回る。
+  * 号車は頭に固定（HEADS の並び順に ①②③…）。助手席の人はその日に乗る号車を書く。
   * 連続出勤は MAX_CONSECUTIVE 日まで（前月末からの連勤も CARRY_IN_STREAK で引き継ぐ）。
   * 希望休は必ず休みにする。
-  * 出勤日数はメンバー間でできるだけ均等にする。
-  * 同じ頭と助手の組み合わせが偏らないように毎日ペアを組み替える。
+  * TARGET_AVG_WORK_DAYS を決めると、平日の組数を自動で調整して平均出勤日数を合わせる。
+  * 出勤日数・土日出勤・組み合わせをメンバー間で平準化する。
 """
 
 import calendar
@@ -20,8 +20,6 @@ from datetime import date
 YEAR = 2026
 MONTH = 10
 
-# 頭（運転の主担当）と助手。人数が違っても動く。
-# 頭は号車が固定（HEADS の並び順に ①②③④…）、助手はその日に組む頭の号車を書く。
 # 号車は現行の出勤表と同じ番号（船木①・和田②・永井③・山谷④・横山⑤）
 HEADS = ['船木智一', '和田陽向太', '永井海里', '山谷大地', '横山凌']
 ASSISTANTS = ['新田', '古川', '山口', '徳留']
@@ -29,55 +27,82 @@ ASSISTANTS = ['新田', '古川', '山口', '徳留']
 # 出勤表に列だけ用意して、ローテーションには入れない人（空欄で出力）
 EXTRA_COLUMNS = ['派遣']
 
-CREWS_WEEKDAY = 2       # 平日に出す組数
-CREWS_WEEKEND = 4       # 土日に出す組数（土日を多めに）
-CREWS_OVERRIDE = {}     # 日にち -> 組数（祝日・繁忙日の個別指定）例: {12: 4}
+TARGET_AVG_WORK_DAYS = 24   # 1人あたりの平均出勤日数。None なら CREWS_WEEKDAY を使う
+CREWS_WEEKEND = 4           # 土日に出す組数（土日を多めに）
+CREWS_WEEKDAY = 3           # TARGET_AVG_WORK_DAYS が None のときの平日の組数
+MAX_CREWS = 5               # 車の台数
+CREWS_OVERRIDE = {}         # 日にち -> 組数（祝日・繁忙日の個別指定）例: {12: 4}
 
-# 希望休。氏名 -> 日にちのリスト。例: {'頭A': [3, 20], '助手B': [12]}
+# 希望休。氏名 -> 日にちのリスト。例: {'船木智一': [3, 20], '新田': [12]}
 REQUESTED_OFF = {}
 
 MAX_CONSECUTIVE = 6     # 連続出勤の上限（日）
-CARRY_IN_STREAK = {}    # 氏名 -> 前月末時点で何連勤しているか。例: {'頭A': 2}
+CARRY_IN_STREAK = {}    # 氏名 -> 前月末時点で何連勤しているか。例: {'船木智一': 2}
 
-PREFER_LONG_RUNS = True  # True: 出勤をまとめて連勤気味に / False: 休みを散らす
-SEED = 20261001          # 乱数種。変えると別パターンのシフトが出る
-TRIES = 400              # 生成の試行回数
+SEED = 20261001         # 乱数種。変えると別パターンの出勤表が出る
+TRIES = 300             # 生成の試行回数
 
 OUT = f'{YEAR}年{MONTH}月_出勤表.xlsx'
 
 WEEK_JA = ['月', '火', '水', '木', '金', '土', '日']
 CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩'
+MEMBERS = HEADS + ASSISTANTS
+
 
 # ------------------------------------------------------------ 日別の枠 ----
 
 
 def build_days():
-    """その月の各日について、曜日と目標組数を組み立てる。"""
+    """その月の各日について、曜日と出す組数を決める。"""
     last = calendar.monthrange(YEAR, MONTH)[1]
     days = []
     for d in range(1, last + 1):
         wd = date(YEAR, MONTH, d).weekday()
-        is_weekend = wd >= 5
-        target = CREWS_OVERRIDE.get(d, CREWS_WEEKEND if is_weekend else CREWS_WEEKDAY)
-        days.append({'day': d, 'wd': wd, 'weekend': is_weekend, 'target': target})
+        days.append({'day': d, 'wd': wd, 'weekend': wd >= 5, 'target': 0})
+
+    cap = min(MAX_CREWS, len(HEADS), len(MEMBERS) // 2)
+    weekend = [s for s in days if s['weekend']]
+    weekday = [s for s in days if not s['weekend']]
+    for s in weekend:
+        s['target'] = min(CREWS_WEEKEND, cap)
+
+    if TARGET_AVG_WORK_DAYS is None:
+        for s in weekday:
+            s['target'] = min(CREWS_WEEKDAY, cap)
+    else:
+        # 延べ出勤人日 ÷ 2 が必要な組日数。土日分を引いた残りを平日に割り振る。
+        total_crew_days = round(len(MEMBERS) * TARGET_AVG_WORK_DAYS / 2)
+        rest = total_crew_days - sum(s['target'] for s in weekend)
+        base, extra = divmod(max(rest, 0), len(weekday))
+        base = min(base, cap)
+        for s in weekday:
+            s['target'] = base
+        # 「base+1組」の日を月内に均等にばらけさせる
+        if base < cap:
+            for k in range(min(extra, len(weekday))):
+                weekday[round(k * len(weekday) / extra)]['target'] = base + 1
+
+    for s in days:
+        if s['day'] in CREWS_OVERRIDE:
+            s['target'] = min(CREWS_OVERRIDE[s['day']], cap)
     return days
 
 
-def off_sets(members):
-    return {m: set(REQUESTED_OFF.get(m, [])) for m in members}
+def off_sets():
+    return {m: set(REQUESTED_OFF.get(m, [])) for m in MEMBERS}
 
 
-def cap_targets(days, heads_off, assist_off):
-    """希望休で頭または助手が足りない日は、その日の組数を実際に出せる数まで下げる。"""
+def cap_targets(days, offs):
+    """希望休で人が足りない日は、その日の組数を実際に出せる数まで下げる。"""
     notes = []
     for spec in days:
         d = spec['day']
-        avail_h = sum(1 for m in HEADS if d not in heads_off[m])
-        avail_a = sum(1 for m in ASSISTANTS if d not in assist_off[m])
-        capped = min(spec['target'], avail_h, avail_a)
+        avail = [m for m in MEMBERS if d not in offs[m]]
+        avail_heads = sum(1 for m in avail if m in HEADS)
+        capped = min(spec['target'], len(avail) // 2, avail_heads)
         if capped < spec['target']:
             notes.append(f'{MONTH}/{d}({WEEK_JA[spec["wd"]]}) 希望休のため {spec["target"]}組 → {capped}組')
-        spec['target'] = capped
+            spec['target'] = capped
     return notes
 
 
@@ -85,7 +110,6 @@ def cap_targets(days, heads_off, assist_off):
 
 
 def streak_ok(flags, carry):
-    """連続出勤が上限以内か。carry は前月末からの連勤日数。"""
     run = carry
     for worked in flags:
         run = run + 1 if worked else 0
@@ -94,52 +118,60 @@ def streak_ok(flags, carry):
     return True
 
 
-def solve_role(members, days, offs, carry_in, rng):
-    """1つの職種（頭 or 助手）について、日ごとの出勤者を決める。"""
+def max_run(flags, carry):
+    run, best = carry, carry
+    for w in flags:
+        run = run + 1 if w else 0
+        best = max(best, run)
+    return best
+
+
+def solve(days, offs, rng):
+    """日ごとに出勤者（2×組数 名、うち頭が組数以上）を決める。"""
     n = len(days)
-    avail = [[m for m in members if days[i]['day'] not in offs[m]] for i in range(n)]
-    # その日に出られる人数と必要人数が同じなら、その人たちは出勤が確定（＝強制出勤）。
-    forced = [set(avail[i]) if days[i]['target'] >= len(avail[i]) else set() for i in range(n)]
+    avail = [[m for m in MEMBERS if days[i]['day'] not in offs[m]] for i in range(n)]
+    need = [2 * s['target'] for s in days]
+    # 出られる人数と必要人数が同じ日は、その人たちは出勤が確定する
+    forced = [set(avail[i]) if need[i] >= len(avail[i]) else set() for i in range(n)]
 
     def forced_run(start, m):
-        """start 日以降、m が連続して強制出勤になる日数。"""
-        c = 0
-        i = start
+        c, i = 0, start
         while i < n and m in forced[i]:
             c += 1
             i += 1
         return c
 
-    work = {m: [False] * n for m in members}
-    worked = {m: 0 for m in members}
-    weekend_worked = {m: 0 for m in members}
-    streak = {m: carry_in.get(m, 0) for m in members}
+    work = {m: [False] * n for m in MEMBERS}
+    worked = {m: 0 for m in MEMBERS}
+    weekend_worked = {m: 0 for m in MEMBERS}
+    streak = {m: CARRY_IN_STREAK.get(m, 0) for m in MEMBERS}
     shortages = []
 
     for i, spec in enumerate(days):
-        need = spec['target']
-        cands = []
-        for m in avail[i]:
-            # 今日出ると、その後の強制出勤日まで含めて上限を超えないか
-            if streak[m] + 1 + forced_run(i + 1, m) <= MAX_CONSECUTIVE:
-                cands.append(m)
-        if len(cands) < need:
-            shortages.append((spec['day'], need, len(cands)))
-            need = len(cands)
+        crews = spec['target']
+        cands = [m for m in avail[i]
+                 if streak[m] + 1 + forced_run(i + 1, m) <= MAX_CONSECUTIVE]
+        heads_avail = [m for m in cands if m in HEADS]
+        if len(cands) < need[i] or len(heads_avail) < crews:
+            crews = min(crews, len(cands) // 2, len(heads_avail))
+            shortages.append((spec['day'], spec['target'], crews))
+        want = 2 * crews
 
-        run = (lambda m: -streak[m]) if PREFER_LONG_RUNS else (lambda m: streak[m])
         if spec['weekend']:
-            # 土日は、土日の出勤回数が少ない人から埋める（土日の休みが偏らないように）
-            key = lambda m: (weekend_worked[m], worked[m], run(m), rng.random())
+            key = lambda m: (weekend_worked[m], worked[m], -streak[m], rng.random())
         else:
-            key = lambda m: (worked[m], run(m), rng.random())
-        # 強制出勤の人を先に、残りは出勤日数の少ない人から
-        must = [m for m in cands if m in forced[i]]
-        rest = sorted((m for m in cands if m not in forced[i]), key=key)
-        chosen = (must + rest)[:need]
+            key = lambda m: (worked[m], -streak[m], rng.random())
+        order = sorted(cands, key=key)
+        chosen = order[:want]
+        # 頭が組数に満たなければ、出勤日数の多い非・頭と入れ替える
+        while sum(1 for m in chosen if m in HEADS) < crews:
+            out = max((m for m in chosen if m not in HEADS), key=key)
+            inn = min((m for m in order if m in HEADS and m not in chosen), key=key)
+            chosen[chosen.index(out)] = inn
 
-        for m in members:
-            if m in chosen:
+        picked = set(chosen)
+        for m in MEMBERS:
+            if m in picked:
                 work[m][i] = True
                 worked[m] += 1
                 if spec['weekend']:
@@ -148,19 +180,18 @@ def solve_role(members, days, offs, carry_in, rng):
             else:
                 streak[m] = 0
 
-    # 土日と平日を別々に平準化する（土日を先に揃え、そのあと平日で総日数を揃える）
     weekend_idx = [i for i, s in enumerate(days) if s['weekend']]
     weekday_idx = [i for i, s in enumerate(days) if not s['weekend']]
-    rebalance(members, days, work, offs, carry_in, rng, weekend_idx)
-    rebalance(members, days, work, offs, carry_in, rng, weekday_idx)
+    rebalance(days, work, offs, rng, weekend_idx)
+    rebalance(days, work, offs, rng, weekday_idx)
     return work, shortages
 
 
-def rebalance(members, days, work, offs, carry_in, rng, idx_pool):
+def rebalance(days, work, offs, rng, idx_pool):
     """idx_pool の日に限って出勤日を交換し、その範囲の出勤日数を平準化する。"""
     pool = set(idx_pool)
-    for _ in range(3000):
-        counts = {m: sum(1 for i in pool if work[m][i]) for m in members}
+    for _ in range(4000):
+        counts = {m: sum(1 for i in pool if work[m][i]) for m in MEMBERS}
         hi = max(counts, key=lambda m: counts[m])
         lo = min(counts, key=lambda m: counts[m])
         if counts[hi] - counts[lo] <= 1:
@@ -169,9 +200,14 @@ def rebalance(members, days, work, offs, carry_in, rng, idx_pool):
                 if work[hi][i] and not work[lo][i] and days[i]['day'] not in offs[lo]]
         rng.shuffle(idxs)
         for i in idxs:
+            heads_now = sum(1 for m in HEADS if work[m][i])
+            after = heads_now - (hi in HEADS) + (lo in HEADS)
+            if after < days[i]['target']:
+                continue
             work[hi][i] = False
             work[lo][i] = True
-            if streak_ok(work[hi], carry_in.get(hi, 0)) and streak_ok(work[lo], carry_in.get(lo, 0)):
+            if (streak_ok(work[hi], CARRY_IN_STREAK.get(hi, 0))
+                    and streak_ok(work[lo], CARRY_IN_STREAK.get(lo, 0))):
                 break
             work[hi][i] = True
             work[lo][i] = False
@@ -179,14 +215,14 @@ def rebalance(members, days, work, offs, carry_in, rng, idx_pool):
             return
 
 
-def spread(members, days, offs, carry_in, seed_base):
-    """複数回作って、出勤日数のばらつきが最も小さいものを採用する。"""
+def spread(days, offs):
+    """複数回作って、出勤日数・土日出勤のばらつきが最も小さいものを採用する。"""
     best = None
     for t in range(TRIES):
-        rng = random.Random(seed_base + t)
-        work, shortages = solve_role(members, days, offs, carry_in, rng)
-        counts = [sum(work[m]) for m in members]
-        we = [sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i]) for m in members]
+        rng = random.Random(SEED + t)
+        work, shortages = solve(days, offs, rng)
+        counts = [sum(work[m]) for m in MEMBERS]
+        we = [sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i]) for m in MEMBERS]
         score = (len(shortages), max(we) - min(we), max(counts) - min(counts))
         if best is None or score < best[0]:
             best = (score, work, shortages)
@@ -198,83 +234,84 @@ def spread(members, days, offs, carry_in, seed_base):
 # ------------------------------------------------------------ ペア編成 ----
 
 
-def make_pairs(days, head_work, assist_work, rng):
-    """毎日の頭と助手を、過去の組み合わせ回数が少なくなるように組む。"""
-    seen = defaultdict(int)
+def make_pairs(days, work, rng):
+    """毎日の号車ごとに「頭（運転）＋相方」を決める。頭が余る日は頭が助手席に回る。"""
+    seen = defaultdict(int)      # 組み合わせ回数
+    passenger = {h: 0 for h in HEADS}   # 頭が助手席に回った回数
     pairs_by_day = []
     for i, spec in enumerate(days):
-        hs = [m for m in HEADS if head_work[m][i]]
-        as_ = [m for m in ASSISTANTS if assist_work[m][i]]
-        k = min(len(hs), len(as_))
-        hs, as_ = hs[:k], as_[:k]
+        crews = spec['target']
+        working = [m for m in MEMBERS if work[m][i]]
+        heads_in = [m for m in HEADS if work[m][i]]
+        # 助手席に回った回数が多い頭から順に運転（＝助手席役を輪番にする）
+        leaders = sorted(heads_in, key=lambda h: (-passenger[h], rng.random()))[:crews]
+        leaders = [h for h in HEADS if h in leaders]
+        partners = [m for m in working if m not in leaders]
+        for h in heads_in:
+            if h not in leaders:
+                passenger[h] += 1
+
         best, best_cost = None, None
-        for perm in itertools.permutations(as_):
-            cost = sum(seen[(h, a)] for h, a in zip(hs, perm))
-            jitter = rng.random() * 0.01
-            if best_cost is None or cost + jitter < best_cost:
-                best, best_cost = perm, cost + jitter
-        pairs = list(zip(hs, best or ()))
+        for perm in itertools.permutations(partners):
+            cost = sum(seen[tuple(sorted((h, a)))] for h, a in zip(leaders, perm))
+            cost += rng.random() * 0.01
+            if best_cost is None or cost < best_cost:
+                best, best_cost = perm, cost
+        pairs = list(zip(leaders, best or ()))
         for h, a in pairs:
-            seen[(h, a)] += 1
+            seen[tuple(sorted((h, a)))] += 1
         pairs_by_day.append(pairs)
-    return pairs_by_day, seen
+    return pairs_by_day, seen, passenger
+
+
+def build_assignment(days, work, pairs_by_day):
+    """各人・各日のセル内容（号車の丸数字 or 休）を決める。"""
+    car_no = {h: i + 1 for i, h in enumerate(HEADS)}
+    cells = {m: [''] * len(days) for m in MEMBERS}
+    for i in range(len(days)):
+        ride = {}
+        for h, a in pairs_by_day[i]:
+            ride[h] = car_no[h]
+            ride[a] = car_no[h]
+        for m in MEMBERS:
+            if not work[m][i]:
+                cells[m][i] = '休'
+            else:
+                n = ride.get(m)
+                cells[m][i] = CIRCLED[n - 1] if n else '○'
+    return cells
 
 
 # ---------------------------------------------------------------- 出力 ----
 
 
-def build_assignment(days, head_work, assist_work, pairs_by_day):
-    """各人・各日のセル内容を決める。頭は固定の号車、助手はその日に組む頭の号車。"""
-    car_no = {h: i + 1 for i, h in enumerate(HEADS)}
-    cells = {m: [''] * len(days) for m in HEADS + ASSISTANTS}
-    for i in range(len(days)):
-        partner = {a: car_no[h] for h, a in pairs_by_day[i]}
-        for m in HEADS:
-            cells[m][i] = CIRCLED[car_no[m] - 1] if head_work[m][i] else '休'
-        for m in ASSISTANTS:
-            if not assist_work[m][i]:
-                cells[m][i] = '休'
-            else:
-                n = partner.get(m)
-                cells[m][i] = CIRCLED[n - 1] if n else '○'
-    return cells
-
-
-def max_run(flags, carry):
-    run, best = carry, carry
-    for w in flags:
-        run = run + 1 if w else 0
-        best = max(best, run)
-    return best
-
-
-def print_table(days, head_work, assist_work, cells, pairs_by_day, shortages, seen):
-    members = HEADS + ASSISTANTS
-    width = max(len(m) for m in members) + 2
+def print_table(days, work, cells, pairs_by_day, shortages, seen, passenger):
+    width = max(len(m) for m in MEMBERS) * 2 + 2
     hdr = '氏名'.ljust(width) + ' '.join(f'{s["day"]:>2}' for s in days) + '  出勤 土日'
     print(hdr)
     print('-' * len(hdr))
     print('曜日'.ljust(width) + ' '.join(f'{WEEK_JA[s["wd"]]:>2}' for s in days))
-    print('車台数'.ljust(width - 1) + ' '.join(f'{len(pairs_by_day[i]):>2}' for i in range(len(days))))
-    for label, group, work in (('【頭】', HEADS, head_work), ('【助手】', ASSISTANTS, assist_work)):
+    print('車台数'.ljust(width - 2) + ' '.join(f'{len(pairs_by_day[i]):>2}' for i in range(len(days))))
+    for label, group in (('【頭】', HEADS), ('【助手】', ASSISTANTS)):
         print(label)
         for m in group:
             line = ' '.join(f'{cells[m][i]:>2}' for i in range(len(days)))
             we = sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i])
-            print(m.ljust(width) + line + f'  {sum(work[m]):>3} {we:>3}')
-    print()
+            pad = width - len(m) * 2
+            print(m + ' ' * max(pad, 1) + line + f'  {sum(work[m]):>3} {we:>3}')
+    avg = sum(sum(work[m]) for m in MEMBERS) / len(MEMBERS)
+    print(f'\n平均出勤日数: {avg:.1f}日 / {len(days)}日')
     print('連勤の最大: ' + ', '.join(
-        f'{m}={max_run(work[m], CARRY_IN_STREAK.get(m, 0))}'
-        for group, work in ((HEADS, head_work), (ASSISTANTS, assist_work))
-        for m in group))
+        f'{m}={max_run(work[m], CARRY_IN_STREAK.get(m, 0))}' for m in MEMBERS))
+    print('頭が助手席に回った回数: ' + ', '.join(f'{h}={c}' for h, c in passenger.items()))
     if shortages:
         print('\n人数が足りず組数を減らした日:')
         for d, want, got in sorted(set(shortages)):
             print(f'  {MONTH}/{d}  {want}組 → {got}組')
-    print('\n組み合わせ回数: ' + ', '.join(f'{h}×{a}={c}' for (h, a), c in sorted(seen.items())))
+    print('\n組み合わせ回数: ' + ', '.join(f'{a}×{b}={c}' for (a, b), c in sorted(seen.items())))
 
 
-def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs_by_day, notes, shortages):
+def write_xlsx(days, work, offs, cells, pairs_by_day, notes, shortages, passenger):
     """手書きの出勤表と同じ様式（縦＝日付、横＝氏名、セル＝号車 or 休）で書き出す。"""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -293,11 +330,9 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
     name_fill = PatternFill('solid', fgColor='EFEFEF')
     big = Font(bold=True, size=14)
 
-    members = HEADS + ASSISTANTS
-    columns = members + EXTRA_COLUMNS
-    ncols = 3 + len(columns)          # 日 / 曜 / 車台数 / 氏名…
+    columns = MEMBERS + EXTRA_COLUMNS
+    ncols = 3 + len(columns)
 
-    # 見出し行
     ws.cell(1, 3, f'{YEAR}年').font = big
     ws.cell(1, 3).alignment = center
     ws.cell(1, 3 + max(1, len(columns) // 3), '出勤表').font = big
@@ -339,9 +374,8 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
             cell.border = border
             if name not in cells:
                 continue
-            offs = heads_off if name in HEADS else assist_off
-            requested = spec['day'] in offs[name]
             cell.value = cells[name][i]
+            requested = spec['day'] in offs[name]
             if cell.value == '休':
                 cell.fill = req_fill if requested else off_fill
                 if requested:
@@ -351,7 +385,6 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
             elif spec['wd'] == 6:
                 cell.fill = sun_fill
 
-    # 合計・残業行
     total_row = HEAD_ROW + 1 + len(days)
     ws.cell(total_row, 1, '合計').font = Font(bold=True)
     ws.cell(total_row + 1, 1, '残業').font = Font(bold=True)
@@ -362,7 +395,6 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
     ws.cell(total_row, 3, sum(len(p) for p in pairs_by_day))
     for j, name in enumerate(columns):
         if name in cells:
-            work = head_work if name in HEADS else assist_work
             ws.cell(total_row, 4 + j, sum(work[name]))
 
     ws.freeze_panes = 'D3'
@@ -377,9 +409,8 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
     ws2.cell(1, 1, '日').font = Font(bold=True)
     ws2.cell(1, 2, '曜').font = Font(bold=True)
     ws2.cell(1, 3, '車台数').font = Font(bold=True)
-    maxc = max((len(p) for p in pairs_by_day), default=0)
-    for k in range(maxc):
-        ws2.cell(1, 4 + k, f'{CIRCLED[k]}号車').font = Font(bold=True)
+    for k in range(len(HEADS)):
+        ws2.cell(1, 4 + k, f'{CIRCLED[k]}{HEADS[k]}').font = Font(bold=True)
     for i, spec in enumerate(days):
         r = 2 + i
         ws2.cell(r, 1, f'{MONTH}/{spec["day"]}').border = border
@@ -393,17 +424,18 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
         c = ws2.cell(r, 3, len(pairs_by_day[i]))
         c.border = border
         c.alignment = center
-        by_car = {HEADS.index(h): (h, a) for h, a in pairs_by_day[i]}
-        for k in range(maxc):
-            pair = by_car.get(k)
-            cell = ws2.cell(r, 4 + k, f'{pair[0]} ／ {pair[1]}' if pair else '')
+        by_car = {HEADS.index(h): a for h, a in pairs_by_day[i]}
+        for k in range(len(HEADS)):
+            cell = ws2.cell(r, 4 + k, by_car.get(k, '運休'))
             cell.border = border
             cell.alignment = center
+            if k not in by_car:
+                cell.fill = off_fill
     ws2.column_dimensions['A'].width = 8
     ws2.column_dimensions['B'].width = 5
     ws2.column_dimensions['C'].width = 7
-    for k in range(maxc):
-        ws2.column_dimensions[ws2.cell(1, 4 + k).column_letter].width = 24
+    for k in range(len(HEADS)):
+        ws2.column_dimensions[ws2.cell(1, 4 + k).column_letter].width = 16
 
     # --- 備考シート ---
     ws3 = wb.create_sheet('備考')
@@ -411,7 +443,7 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
     ws3.cell(r, 1, '設定').font = Font(bold=True)
     r += 1
     for k, v in (('対象月', f'{YEAR}年{MONTH}月'),
-                 ('平日の組数', CREWS_WEEKDAY),
+                 ('目標の平均出勤日数', f'{TARGET_AVG_WORK_DAYS}日' if TARGET_AVG_WORK_DAYS else '指定なし'),
                  ('土日の組数', CREWS_WEEKEND),
                  ('連続出勤の上限', f'{MAX_CONSECUTIVE}日'),
                  ('頭（号車固定）', '、'.join(f'{CIRCLED[i]}{h}' for i, h in enumerate(HEADS))),
@@ -422,22 +454,22 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
     r += 1
     ws3.cell(r, 1, '希望休').font = Font(bold=True)
     r += 1
-    for m in members:
+    for m in MEMBERS:
         ds = REQUESTED_OFF.get(m)
         if ds:
             ws3.cell(r, 1, m)
             ws3.cell(r, 2, '、'.join(f'{MONTH}/{d}' for d in ds))
             r += 1
     r += 1
-    ws3.cell(r, 1, '出勤日数・土日出勤').font = Font(bold=True)
+    ws3.cell(r, 1, '1人ごとの内訳').font = Font(bold=True)
     r += 1
-    for group, work in ((HEADS, head_work), (ASSISTANTS, assist_work)):
-        for m in group:
-            we = sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i])
-            ws3.cell(r, 1, m)
-            ws3.cell(r, 2, f'出勤{sum(work[m])}日／土日{we}日／公休{len(days) - sum(work[m])}日／'
-                           f'最大{max_run(work[m], CARRY_IN_STREAK.get(m, 0))}連勤')
-            r += 1
+    for m in MEMBERS:
+        we = sum(1 for i, s in enumerate(days) if s['weekend'] and work[m][i])
+        extra = f'／助手席{passenger[m]}日' if m in HEADS and passenger.get(m) else ''
+        ws3.cell(r, 1, m)
+        ws3.cell(r, 2, f'出勤{sum(work[m])}日／土日{we}日／公休{len(days) - sum(work[m])}日／'
+                       f'最大{max_run(work[m], CARRY_IN_STREAK.get(m, 0))}連勤{extra}')
+        r += 1
     if notes or shortages:
         r += 1
         ws3.cell(r, 1, '注意').font = Font(bold=True)
@@ -449,60 +481,48 @@ def write_xlsx(days, head_work, assist_work, heads_off, assist_off, cells, pairs
             ws3.cell(r, 1, f'{MONTH}/{d} 人数不足のため {want}組 → {got}組')
             r += 1
     ws3.column_dimensions['A'].width = 46
-    ws3.column_dimensions['B'].width = 60
+    ws3.column_dimensions['B'].width = 62
 
     wb.save(OUT)
     return OUT
 
 
-def verify(days, head_work, assist_work, heads_off, assist_off):
-    """希望休・連勤上限・組数が守れているかを確認する。"""
+def verify(days, work, offs, pairs_by_day):
     errors = []
-    for members, work, offs in ((HEADS, head_work, heads_off), (ASSISTANTS, assist_work, assist_off)):
-        for m in members:
-            for i, spec in enumerate(days):
-                if work[m][i] and spec['day'] in offs[m]:
-                    errors.append(f'{m}: 希望休 {MONTH}/{spec["day"]} に出勤している')
-            if max_run(work[m], CARRY_IN_STREAK.get(m, 0)) > MAX_CONSECUTIVE:
-                errors.append(f'{m}: 連続出勤が{MAX_CONSECUTIVE}日を超えている')
+    for m in MEMBERS:
+        for i, spec in enumerate(days):
+            if work[m][i] and spec['day'] in offs[m]:
+                errors.append(f'{m}: 希望休 {MONTH}/{spec["day"]} に出勤している')
+        if max_run(work[m], CARRY_IN_STREAK.get(m, 0)) > MAX_CONSECUTIVE:
+            errors.append(f'{m}: 連続出勤が{MAX_CONSECUTIVE}日を超えている')
     for i, spec in enumerate(days):
-        h = sum(1 for m in HEADS if head_work[m][i])
-        a = sum(1 for m in ASSISTANTS if assist_work[m][i])
-        if h != a:
-            errors.append(f'{MONTH}/{spec["day"]}: 頭{h}名・助手{a}名で組が作れない')
+        pairs = pairs_by_day[i]
+        riders = [m for p in pairs for m in p]
+        if len(riders) != len(set(riders)):
+            errors.append(f'{MONTH}/{spec["day"]}: 同じ人が2台に乗っている')
+        if sum(work[m][i] for m in MEMBERS) != 2 * len(pairs):
+            errors.append(f'{MONTH}/{spec["day"]}: 出勤者と乗車人数が合わない')
+        for h, a in pairs:
+            if h not in HEADS:
+                errors.append(f'{MONTH}/{spec["day"]}: 頭のいない組がある')
     return errors
 
 
 def main():
     rng = random.Random(SEED)
     days = build_days()
-    heads_off = off_sets(HEADS)
-    assist_off = off_sets(ASSISTANTS)
-    notes = cap_targets(days, heads_off, assist_off)
+    offs = off_sets()
+    notes = cap_targets(days, offs)
 
-    head_work, sh1 = spread(HEADS, days, heads_off, CARRY_IN_STREAK, SEED)
-    assist_work, sh2 = spread(ASSISTANTS, days, assist_off, CARRY_IN_STREAK, SEED + 10000)
+    work, shortages = spread(days, offs)
+    pairs_by_day, seen, passenger = make_pairs(days, work, rng)
+    cells = build_assignment(days, work, pairs_by_day)
 
-    # 頭と助手で出勤人数がずれた日は、少ない方に合わせて組数を確定する
-    shortages = sorted(set(sh1) | set(sh2))
-    for i, spec in enumerate(days):
-        h = sum(1 for m in HEADS if head_work[m][i])
-        a = sum(1 for m in ASSISTANTS if assist_work[m][i])
-        if h != a:
-            more, work, members = (HEADS, head_work, HEADS) if h > a else (ASSISTANTS, assist_work, ASSISTANTS)
-            surplus = [m for m in members if work[m][i]]
-            surplus.sort(key=lambda m: -sum(work[m]))
-            for m in surplus[:abs(h - a)]:
-                work[m][i] = False
-            shortages.append((spec['day'], spec['target'], min(h, a)))
-
-    pairs_by_day, seen = make_pairs(days, head_work, assist_work, rng)
-    cells = build_assignment(days, head_work, assist_work, pairs_by_day)
-    print_table(days, head_work, assist_work, cells, pairs_by_day, shortages, seen)
+    print_table(days, work, cells, pairs_by_day, shortages, seen, passenger)
     for note in notes:
         print('注意:', note)
 
-    errors = verify(days, head_work, assist_work, heads_off, assist_off)
+    errors = verify(days, work, offs, pairs_by_day)
     if errors:
         print('\n*** 制約違反 ***')
         for e in errors:
@@ -510,9 +530,7 @@ def main():
     else:
         print('\n制約チェック: 希望休・連勤上限・組編成すべてOK')
 
-    path = write_xlsx(days, head_work, assist_work, heads_off, assist_off,
-                      cells, pairs_by_day, notes, shortages)
-    print('出力:', path)
+    print('出力:', write_xlsx(days, work, offs, cells, pairs_by_day, notes, shortages, passenger))
 
 
 if __name__ == '__main__':
